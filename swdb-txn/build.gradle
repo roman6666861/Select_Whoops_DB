@@ -1,0 +1,7 @@
+plugins {
+    id 'swdb.java-conventions'
+}
+
+dependencies {
+    api project(':swdb-storage')
+}

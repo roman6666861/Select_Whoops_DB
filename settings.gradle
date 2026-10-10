@@ -1,0 +1,20 @@
+plugins {
+    id 'org.gradle.toolchains.foojay-resolver-convention' version '1.0.0'
+}
+
+rootProject.name = 'select-whoops-db'
+
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        mavenCentral()
+    }
+}
+
+include 'swdb-common',
+        'swdb-storage',
+        'swdb-txn',
+        'swdb-catalog',
+        'swdb-sql',
+        'swdb-server',
+        'swdb-it'

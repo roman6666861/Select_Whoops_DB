@@ -1,0 +1,20 @@
+plugins {
+    id 'swdb.java-conventions'
+    id 'application'
+}
+
+dependencies {
+    implementation project(':swdb-sql')
+    implementation platform(libs.netty.bom)
+    implementation libs.netty.transport
+    implementation libs.netty.codec.base
+    implementation libs.slf4j.api
+    implementation libs.picocli
+    runtimeOnly libs.logback.classic
+}
+
+application {
+    mainClass = 'io.github.roman6666861.swdb.server.SwdbMain'
+    applicationName = 'swdb'
+    applicationDefaultJvmArgs = ['--enable-native-access=ALL-UNNAMED']
+}

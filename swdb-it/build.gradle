@@ -1,0 +1,8 @@
+plugins {
+    id 'swdb.java-conventions'
+}
+
+dependencies {
+    testImplementation project(':swdb-server')
+    testImplementation libs.postgresql
+}

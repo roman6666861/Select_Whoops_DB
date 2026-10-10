@@ -1,0 +1,26 @@
+[versions]
+calcite = "1.42.0"
+rocksdb = "11.1.2"
+netty = "4.2.19.Final"
+slf4j = "2.0.20"
+logback = "1.6.5"
+picocli = "4.7.7"
+junit = "6.1.3"
+assertj = "3.27.7"
+postgresql = "42.7.14"
+
+[libraries]
+calcite-core = { module = "org.apache.calcite:calcite-core", version.ref = "calcite" }
+rocksdbjni = { module = "org.rocksdb:rocksdbjni", version.ref = "rocksdb" }
+netty-bom = { module = "io.netty:netty-bom", version.ref = "netty" }
+netty-transport = { module = "io.netty:netty-transport" }
+netty-codec-base = { module = "io.netty:netty-codec-base" }
+slf4j-api = { module = "org.slf4j:slf4j-api", version.ref = "slf4j" }
+logback-classic = { module = "ch.qos.logback:logback-classic", version.ref = "logback" }
+picocli = { module = "info.picocli:picocli", version.ref = "picocli" }
+postgresql = { module = "org.postgresql:postgresql", version.ref = "postgresql" }
+
+junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }
+junit-jupiter = { module = "org.junit.jupiter:junit-jupiter" }
+junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher" }
+assertj-core = { module = "org.assertj:assertj-core", version.ref = "assertj" }

@@ -1,0 +1,37 @@
+// Общие настройки для всех Java-модулей проекта.
+plugins {
+    id 'java-library'
+}
+
+def libs = extensions.getByType(VersionCatalogsExtension).named('libs')
+
+group = 'io.github.roman6666861.swdb'
+version = '0.1.0-SNAPSHOT'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.compilerArgs.addAll(['-Xlint:all', '-Xlint:-processing', '-Xlint:-serial'])
+}
+
+dependencies {
+    testImplementation platform(libs.findLibrary('junit-bom').get())
+    testImplementation libs.findLibrary('junit-jupiter').get()
+    testImplementation libs.findLibrary('assertj-core').get()
+    testRuntimeOnly libs.findLibrary('junit-platform-launcher').get()
+}
+
+tasks.withType(Test).configureEach {
+    useJUnitPlatform()
+    // RocksDB загружает нативную библиотеку через JNI (JEP 472).
+    jvmArgs '--enable-native-access=ALL-UNNAMED'
+    testLogging {
+        events 'failed'
+        exceptionFormat = 'full'
+    }
+}
