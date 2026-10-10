@@ -17,4 +17,5 @@ include 'swdb-common',
         'swdb-catalog',
         'swdb-sql',
         'swdb-server',
-        'swdb-it'
+        'swdb-it',
+        'swdb-examples'

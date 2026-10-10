@@ -1,0 +1,13 @@
+plugins {
+    id 'swdb.java-conventions'
+    id 'application'
+}
+
+dependencies {
+    // Обычный JDBC-драйвер PostgreSQL: наш сервер говорит на его протоколе.
+    runtimeOnly libs.postgresql
+}
+
+application {
+    mainClass = 'io.github.roman6666861.swdb.examples.JdbcExample'
+}
