@@ -57,6 +57,19 @@ class KvStoreTest {
     }
 
     @Test
+    void scanRangeIncludesFromAndExcludesTo() {
+        try (KvStore store = KvStore.open(dir)) {
+            for (String key : List.of("a", "b", "b1", "c", "d")) {
+                store.put(bytes(key), bytes("v"));
+            }
+
+            assertThat(scanKeys(store.scan(bytes("b"), bytes("d")))).containsExactly("b", "b1", "c");
+            assertThat(scanKeys(store.scan(bytes("bb"), bytes("c")))).isEmpty();
+            assertThat(scanKeys(store.scan(bytes("c"), null))).containsExactly("c", "d");
+        }
+    }
+
+    @Test
     void batchIsAppliedTogether() {
         try (KvStore store = KvStore.open(dir)) {
             store.put(bytes("t1"), bytes("1"));
@@ -74,8 +87,12 @@ class KvStoreTest {
     }
 
     private static List<String> scanKeys(KvStore store, String prefix) {
+        return scanKeys(store.scan(bytes(prefix)));
+    }
+
+    private static List<String> scanKeys(KvIterator iterator) {
         List<String> keys = new ArrayList<>();
-        try (KvIterator it = store.scan(bytes(prefix))) {
+        try (KvIterator it = iterator) {
             while (it.next()) {
                 keys.add(new String(it.key(), UTF_8));
             }

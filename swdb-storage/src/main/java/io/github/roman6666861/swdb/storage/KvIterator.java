@@ -5,7 +5,7 @@ import org.rocksdb.RocksIterator;
 import java.util.Arrays;
 
 /**
- * Курсор по ключам с общим префиксом. Использование:
+ * Курсор по ключам из диапазона {@code [from, to)} в порядке возрастания. Использование:
  * <pre>{@code
  * try (KvIterator it = store.scan(prefix)) {
  *     while (it.next()) {
@@ -17,23 +17,27 @@ import java.util.Arrays;
 public final class KvIterator implements AutoCloseable {
 
     private final RocksIterator iterator;
-    private final byte[] prefix;
+    private final byte[] from;
+    private final byte[] to;
     private boolean started;
 
-    KvIterator(RocksIterator iterator, byte[] prefix) {
+    /** {@code to == null} — без верхней границы. */
+    KvIterator(RocksIterator iterator, byte[] from, byte[] to) {
         this.iterator = iterator;
-        this.prefix = prefix;
+        this.from = from;
+        this.to = to;
     }
 
-    /** Переходит к следующей записи; {@code false}, если записей с префиксом больше нет. */
+    /** Переходит к следующей записи; {@code false}, если записей в диапазоне больше нет. */
     public boolean next() {
         if (started) {
             iterator.next();
         } else {
-            iterator.seek(prefix);
+            // seek ставит итератор на первый ключ >= from: дальше идём подряд, без поиска.
+            iterator.seek(from);
             started = true;
         }
-        return iterator.isValid() && hasPrefix(iterator.key());
+        return iterator.isValid() && beforeEnd(iterator.key());
     }
 
     public byte[] key() {
@@ -49,8 +53,8 @@ public final class KvIterator implements AutoCloseable {
         iterator.close();
     }
 
-    private boolean hasPrefix(byte[] key) {
-        return key.length >= prefix.length
-                && Arrays.equals(key, 0, prefix.length, prefix, 0, prefix.length);
+    /** RocksDB сравнивает ключи как беззнаковые байты, поэтому и мы — через compareUnsigned. */
+    private boolean beforeEnd(byte[] key) {
+        return to == null || Arrays.compareUnsigned(key, to) < 0;
     }
 }

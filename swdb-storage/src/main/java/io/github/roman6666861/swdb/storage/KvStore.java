@@ -93,7 +93,15 @@ public final class KvStore implements AutoCloseable {
      * Видит согласованный снимок данных на момент создания. Обязательно закрывать.
      */
     public KvIterator scan(byte[] prefix) {
-        return new KvIterator(db.newIterator(), prefix);
+        return scan(prefix, KeyBuilder.prefixEnd(prefix));
+    }
+
+    /**
+     * Итератор по ключам из диапазона {@code [from, to)}; {@code to == null} — до конца хранилища.
+     * Видит согласованный снимок данных на момент создания. Обязательно закрывать.
+     */
+    public KvIterator scan(byte[] from, byte[] to) {
+        return new KvIterator(db.newIterator(), from, to);
     }
 
     @Override

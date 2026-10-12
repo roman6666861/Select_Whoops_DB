@@ -2,6 +2,7 @@ package io.github.roman6666861.swdb.storage;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 
 /**
  * Собирает ключ из значений так, что побайтовое сравнение ключей совпадает
@@ -74,5 +75,23 @@ public final class KeyBuilder {
 
     public byte[] build() {
         return out.toByteArray();
+    }
+
+    /**
+     * Наименьший ключ, который больше всех ключей, начинающихся с {@code prefix}: последний байт,
+     * не равный 0xFF, увеличивается на 1, а всё после него отбрасывается ({@code 61 FF} → {@code 62}).
+     * Тогда «все ключи с префиксом» — это диапазон {@code [prefix, prefixEnd(prefix))}.
+     *
+     * @return {@code null}, если префикс состоит только из 0xFF и верхней границы нет
+     */
+    public static byte[] prefixEnd(byte[] prefix) {
+        for (int i = prefix.length - 1; i >= 0; i--) {
+            if (prefix[i] != (byte) 0xFF) {
+                byte[] end = Arrays.copyOf(prefix, i + 1);
+                end[i]++;
+                return end;
+            }
+        }
+        return null;
     }
 }

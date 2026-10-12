@@ -49,6 +49,23 @@ class KeyBuilderTest {
         assertThat(Arrays.compareUnsigned(a2, ab1)).isNegative();
     }
 
+    @Test
+    void prefixEndIncrementsLastByteThatIsNotFF() {
+        assertThat(KeyBuilder.prefixEnd(new byte[]{0x61, 0x62})).containsExactly(0x61, 0x63);
+        assertThat(KeyBuilder.prefixEnd(new byte[]{0x61, (byte) 0xFF})).containsExactly(0x62);
+        assertThat(KeyBuilder.prefixEnd(new byte[]{0x61, 0x7F})).containsExactly(0x61, 0x80);
+        assertThat(KeyBuilder.prefixEnd(new byte[]{(byte) 0xFF, (byte) 0xFF})).isNull();
+    }
+
+    @Test
+    void prefixEndIsGreaterThanEveryKeyWithPrefix() {
+        byte[] prefix = new KeyBuilder().appendInt(7).build();
+        byte[] end = KeyBuilder.prefixEnd(prefix);
+
+        assertThat(Arrays.compareUnsigned(new KeyBuilder().appendInt(7).appendString("zzz").build(), end)).isNegative();
+        assertThat(Arrays.compareUnsigned(new KeyBuilder().appendInt(8).build(), end)).isNotNegative();
+    }
+
     /** {@code sortedValues} уже отсортированы; их ключи должны идти в том же порядке. */
     private static <T> void assertKeepsOrder(List<T> sortedValues, Function<T, byte[]> encode) {
         List<byte[]> keys = sortedValues.stream().map(encode).toList();
