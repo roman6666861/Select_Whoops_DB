@@ -32,12 +32,14 @@ CREATE TABLE employees (
 );
 INSERT INTO employees VALUES (1, 'Alice', 4800.50, DATE '2022-07-15');
 SELECT name, salary FROM employees WHERE salary > 4000 ORDER BY salary DESC;
+EXPLAIN SELECT name FROM employees WHERE id = 1;
 DELETE FROM employees WHERE hired IS NULL;
 DROP TABLE IF EXISTS employees;
 ```
 
 - `CREATE TABLE [IF NOT EXISTS]`, `DROP TABLE [IF EXISTS]`, `INSERT` (в том числе `INSERT ... SELECT`), `DELETE`;
 - `SELECT` с `WHERE`, `JOIN`, `GROUP BY`, агрегатами, `ORDER BY`, подзапросами, CTE, оконными функциями;
+- `EXPLAIN <запрос>` (как в PostgreSQL) и `EXPLAIN PLAN FOR <запрос>` (как в Calcite) — план без выполнения;
 - типы: `BOOLEAN`, `INT`, `BIGINT`, `DOUBLE`, `DECIMAL(p, s)`, `VARCHAR(n)`/`TEXT`, `DATE`, `TIMESTAMP`;
 - `PRIMARY KEY` (обязателен, можно составной), `NOT NULL`; данные хранятся в RocksDB и переживают перезапуск.
 

@@ -197,6 +197,31 @@ class SqlSessionTest {
         assertSqlState(() -> session.execute("CREATE TABLE nokey (id INT)"), SqlStates.FEATURE_NOT_SUPPORTED);
     }
 
+    @Test
+    void explainShowsPlanLineByLine() {
+        session.execute("CREATE TABLE t (id INT, v INT, PRIMARY KEY (id))");
+
+        for (String sql : List.of("EXPLAIN SELECT v FROM t WHERE id = 5", "EXPLAIN PLAN FOR SELECT v FROM t WHERE id = 5")) {
+            StatementResult result = session.execute(sql);
+
+            assertThat(result).isInstanceOfSatisfying(StatementResult.Rows.class, rows -> {
+                assertThat(rows.columns()).extracting(Column::name).containsExactly("QUERY PLAN");
+                assertThat(rows.rows()).hasSizeGreaterThan(1);
+                assertThat(rows.rows().getLast().getFirst()).asString().contains("EnumerableTableScan(table=[[public, t]])");
+            });
+        }
+    }
+
+    @Test
+    void explainDoesNotExecuteStatement() {
+        session.execute("CREATE TABLE t (id INT, PRIMARY KEY (id))");
+        session.execute("INSERT INTO t VALUES (1)");
+
+        session.execute("EXPLAIN DELETE FROM t");
+
+        assertThat(rows("SELECT id FROM t")).containsExactly(List.of(1));
+    }
+
     /** Строки результата; NULL в конце строки отбрасываются, чтобы сравнивать через List.of. */
     private List<List<Object>> rows(String sql) {
         StatementResult result = session.execute(sql);

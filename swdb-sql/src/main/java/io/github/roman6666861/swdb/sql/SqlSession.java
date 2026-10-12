@@ -7,6 +7,7 @@ import org.apache.calcite.sql.SqlLiteral;
 import org.apache.calcite.sql.SqlNode;
 import org.apache.calcite.sql.SqlCreate;
 import org.apache.calcite.sql.SqlDrop;
+import org.apache.calcite.sql.SqlExplain;
 import org.apache.calcite.sql.SqlMerge;
 import org.apache.calcite.sql.SqlUpdate;
 import org.apache.calcite.sql.SqlSetOption;
@@ -20,6 +21,7 @@ import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.sql.Types;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -27,11 +29,16 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Сессия клиента: выполняет SQL-операторы по одному. Не потокобезопасна.
  */
 public final class SqlSession implements AutoCloseable {
+
+    /** {@code EXPLAIN <запрос>} в стиле PostgreSQL, но не {@code EXPLAIN PLAN ...} в стиле Calcite. */
+    private static final Pattern POSTGRES_EXPLAIN = Pattern.compile("(?is)explain\\s+(?!plan\\s)(.+)");
 
     private final Connection connection;
     private final SqlParser.Config parserConfig;
@@ -50,7 +57,7 @@ public final class SqlSession implements AutoCloseable {
     }
 
     public StatementResult execute(String sql) {
-        String text = stripTrailingSemicolons(sql);
+        String text = calciteExplainSyntax(stripTrailingSemicolons(sql));
         if (text.isEmpty()) {
             return new StatementResult.Empty();
         }
@@ -59,6 +66,7 @@ public final class SqlSession implements AutoCloseable {
             case SqlSetOption set -> applySetting(set);
             case SqlCreateTable create -> ddl.createTable(create);
             case SqlDropTable drop -> ddl.dropTable(drop);
+            case SqlExplain _ -> explain(text);
             case SqlCreate create -> throw unsupported(create.getOperator().getName());
             case SqlDrop drop -> throw unsupported(drop.getOperator().getName());
             // Исполнитель Calcite (Enumerable) умеет только INSERT и DELETE.
@@ -82,6 +90,18 @@ public final class SqlSession implements AutoCloseable {
             // Calcite проверяет свои инварианты через assert; клиент должен получить ошибку, а не обрыв связи.
             throw new SwdbException(SqlStates.INTERNAL_ERROR, "internal error: " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * План запроса. Calcite возвращает его одной многострочной ячейкой в колонке PLAN,
+     * а PostgreSQL — колонкой "QUERY PLAN" по строке результата на каждую строку плана.
+     * Сам запрос при этом не выполняется.
+     */
+    private StatementResult explain(String text) {
+        StatementResult.Rows result = (StatementResult.Rows) executeQuery(text);
+        String plan = (String) result.rows().getFirst().getFirst();
+        List<List<Object>> lines = plan.lines().map(line -> List.<Object>of(line)).toList();
+        return new StatementResult.Rows(List.of(new Column("QUERY PLAN", Types.VARCHAR)), lines);
     }
 
     @Override
@@ -137,6 +157,12 @@ public final class SqlSession implements AutoCloseable {
             text = text.substring(0, text.length() - 1).strip();
         }
         return text;
+    }
+
+    /** PostgreSQL пишет {@code EXPLAIN SELECT ...}, а парсер Calcite ждёт {@code EXPLAIN PLAN FOR SELECT ...}. */
+    private static String calciteExplainSyntax(String sql) {
+        Matcher m = POSTGRES_EXPLAIN.matcher(sql);
+        return m.matches() ? "EXPLAIN PLAN FOR " + m.group(1) : sql;
     }
 
     private static String firstKeyword(String sql) {
