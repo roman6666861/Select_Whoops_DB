@@ -7,6 +7,14 @@ public final class SqlStates {
 
     public static final String SYNTAX_ERROR = "42601";
     public static final String SYNTAX_ERROR_OR_ACCESS_RULE_VIOLATION = "42000";
+    public static final String UNDEFINED_TABLE = "42P01";
+    public static final String UNDEFINED_COLUMN = "42703";
+    public static final String DUPLICATE_TABLE = "42P07";
+    public static final String DUPLICATE_COLUMN = "42701";
+    public static final String INVALID_TABLE_DEFINITION = "42P16";
+    public static final String UNIQUE_VIOLATION = "23505";
+    public static final String NOT_NULL_VIOLATION = "23502";
+    public static final String STRING_DATA_RIGHT_TRUNCATION = "22001";
     public static final String FEATURE_NOT_SUPPORTED = "0A000";
     public static final String PROTOCOL_VIOLATION = "08P01";
     public static final String INTERNAL_ERROR = "XX000";

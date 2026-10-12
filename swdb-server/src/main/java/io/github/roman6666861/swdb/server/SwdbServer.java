@@ -1,5 +1,6 @@
 package io.github.roman6666861.swdb.server;
 
+import io.github.roman6666861.swdb.catalog.Catalog;
 import io.github.roman6666861.swdb.server.pgwire.PgConnectionHandler;
 import io.github.roman6666861.swdb.server.pgwire.PgMessageDecoder;
 import io.github.roman6666861.swdb.sql.SqlEngine;
@@ -36,7 +37,7 @@ public final class SwdbServer implements AutoCloseable {
 
     private SwdbServer(ServerConfig config) throws InterruptedException {
         store = KvStore.open(config.dataDir());
-        SqlEngine engine = new SqlEngine();
+        SqlEngine engine = new SqlEngine(new Catalog(store));
         serverChannel = new ServerBootstrap()
                 .group(bossGroup, workerGroup)
                 .channel(NioServerSocketChannel.class)

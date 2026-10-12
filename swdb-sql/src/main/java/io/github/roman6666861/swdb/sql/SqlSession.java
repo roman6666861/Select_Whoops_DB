@@ -5,7 +5,13 @@ import io.github.roman6666861.swdb.common.SwdbException;
 import org.apache.calcite.runtime.CalciteContextException;
 import org.apache.calcite.sql.SqlLiteral;
 import org.apache.calcite.sql.SqlNode;
+import org.apache.calcite.sql.SqlCreate;
+import org.apache.calcite.sql.SqlDrop;
+import org.apache.calcite.sql.SqlMerge;
+import org.apache.calcite.sql.SqlUpdate;
 import org.apache.calcite.sql.SqlSetOption;
+import org.apache.calcite.sql.ddl.SqlCreateTable;
+import org.apache.calcite.sql.ddl.SqlDropTable;
 import org.apache.calcite.sql.parser.SqlParseException;
 import org.apache.calcite.sql.parser.SqlParser;
 
@@ -29,11 +35,13 @@ public final class SqlSession implements AutoCloseable {
 
     private final Connection connection;
     private final SqlParser.Config parserConfig;
+    private final DdlExecutor ddl;
     private final Map<String, String> settings = new HashMap<>();
 
-    SqlSession(Connection connection, SqlParser.Config parserConfig) {
+    SqlSession(Connection connection, SqlParser.Config parserConfig, DdlExecutor ddl) {
         this.connection = connection;
         this.parserConfig = parserConfig;
+        this.ddl = ddl;
     }
 
     /** Значение параметра сессии, установленного через {@code SET name = value}. */
@@ -46,10 +54,21 @@ public final class SqlSession implements AutoCloseable {
         if (text.isEmpty()) {
             return new StatementResult.Empty();
         }
-        // SET Calcite JDBC не выполняет, поэтому обрабатываем его сами.
-        if (parse(text) instanceof SqlSetOption set) {
-            return applySetting(set);
-        }
+        // SET и DDL Calcite JDBC не выполняет: их обрабатываем сами, остальное отдаём Calcite.
+        return switch (parse(text)) {
+            case SqlSetOption set -> applySetting(set);
+            case SqlCreateTable create -> ddl.createTable(create);
+            case SqlDropTable drop -> ddl.dropTable(drop);
+            case SqlCreate create -> throw unsupported(create.getOperator().getName());
+            case SqlDrop drop -> throw unsupported(drop.getOperator().getName());
+            // Исполнитель Calcite (Enumerable) умеет только INSERT и DELETE.
+            case SqlUpdate _ -> throw unsupported("UPDATE");
+            case SqlMerge _ -> throw unsupported("MERGE");
+            default -> executeQuery(text);
+        };
+    }
+
+    private StatementResult executeQuery(String text) {
         try (Statement statement = connection.createStatement()) {
             if (statement.execute(text)) {
                 try (ResultSet rs = statement.getResultSet()) {
@@ -57,8 +76,11 @@ public final class SqlSession implements AutoCloseable {
                 }
             }
             return new StatementResult.Update(firstKeyword(text), statement.getLargeUpdateCount());
-        } catch (SQLException e) {
+        } catch (SQLException | RuntimeException e) {
             throw translate(e);
+        } catch (AssertionError e) {
+            // Calcite проверяет свои инварианты через assert; клиент должен получить ошибку, а не обрыв связи.
+            throw new SwdbException(SqlStates.INTERNAL_ERROR, "internal error: " + e.getMessage(), e);
         }
     }
 
@@ -121,16 +143,40 @@ public final class SqlSession implements AutoCloseable {
         return sql.split("\\s+", 2)[0].toUpperCase(Locale.ROOT);
     }
 
-    /** Достаёт из цепочки причин ошибку парсера или валидатора Calcite и назначает ей SQLSTATE. */
-    private static SwdbException translate(SQLException e) {
+    private static SwdbException unsupported(String statement) {
+        return new SwdbException(SqlStates.FEATURE_NOT_SUPPORTED, statement + " is not supported yet");
+    }
+
+    /**
+     * Ищет в цепочке причин понятную ошибку и назначает ей SQLSTATE: нашу собственную
+     * (например, нарушение первичного ключа при INSERT), ошибку парсера или валидатора Calcite.
+     */
+    private static SwdbException translate(Exception e) {
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            if (t instanceof SwdbException swdb) {
+                return swdb;
+            }
+        }
         for (Throwable t = e; t != null; t = t.getCause()) {
             if (t instanceof SqlParseException) {
                 return new SwdbException(SqlStates.SYNTAX_ERROR, t.getMessage(), e);
             }
             if (t instanceof CalciteContextException) {
-                return new SwdbException(SqlStates.SYNTAX_ERROR_OR_ACCESS_RULE_VIOLATION, t.getMessage(), e);
+                return new SwdbException(validationSqlState(t.getCause()), t.getMessage(), e);
             }
         }
         return new SwdbException(SqlStates.INTERNAL_ERROR, e.getMessage(), e);
+    }
+
+    /** У валидатора Calcite нет кодов ошибок, поэтому самые частые различаем по тексту. */
+    private static String validationSqlState(Throwable cause) {
+        String message = cause == null ? "" : String.valueOf(cause.getMessage());
+        if (message.matches("Object '.*' not found.*")) {
+            return SqlStates.UNDEFINED_TABLE;
+        }
+        if (message.matches("Column '.*' not found.*")) {
+            return SqlStates.UNDEFINED_COLUMN;
+        }
+        return SqlStates.SYNTAX_ERROR_OR_ACCESS_RULE_VIOLATION;
     }
 }

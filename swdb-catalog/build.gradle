@@ -4,4 +4,6 @@ plugins {
 
 dependencies {
     api project(':swdb-txn')
+    implementation platform(libs.jackson.bom)
+    implementation libs.jackson.databind
 }

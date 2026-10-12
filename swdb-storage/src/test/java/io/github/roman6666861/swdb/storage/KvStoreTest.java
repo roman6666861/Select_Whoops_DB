@@ -4,6 +4,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -40,6 +42,45 @@ class KvStoreTest {
             store.put(bytes("k"), bytes("v"));
             assertThat(store.get(bytes("k"))).isEqualTo(bytes("v"));
         }
+    }
+
+    @Test
+    void scanReturnsOnlyPrefixInKeyOrder() {
+        try (KvStore store = KvStore.open(dir)) {
+            store.put(bytes("a1"), bytes("x"));
+            store.put(bytes("b2"), bytes("2"));
+            store.put(bytes("b1"), bytes("1"));
+            store.put(bytes("c1"), bytes("y"));
+
+            assertThat(scanKeys(store, "b")).containsExactly("b1", "b2");
+        }
+    }
+
+    @Test
+    void batchIsAppliedTogether() {
+        try (KvStore store = KvStore.open(dir)) {
+            store.put(bytes("t1"), bytes("1"));
+            store.put(bytes("t2"), bytes("2"));
+            store.put(bytes("u1"), bytes("3"));
+
+            store.write(batch -> batch
+                    .deleteRange(bytes("t"), bytes("u"))
+                    .put(bytes("meta"), bytes("dropped")));
+
+            assertThat(scanKeys(store, "t")).isEmpty();
+            assertThat(store.get(bytes("u1"))).isEqualTo(bytes("3"));
+            assertThat(store.get(bytes("meta"))).isEqualTo(bytes("dropped"));
+        }
+    }
+
+    private static List<String> scanKeys(KvStore store, String prefix) {
+        List<String> keys = new ArrayList<>();
+        try (KvIterator it = store.scan(bytes(prefix))) {
+            while (it.next()) {
+                keys.add(new String(it.key(), UTF_8));
+            }
+        }
+        return keys;
     }
 
     private static byte[] bytes(String s) {

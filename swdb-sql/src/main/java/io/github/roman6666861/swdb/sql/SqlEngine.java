@@ -1,14 +1,18 @@
 package io.github.roman6666861.swdb.sql;
 
+import io.github.roman6666861.swdb.catalog.Catalog;
 import io.github.roman6666861.swdb.common.SqlStates;
 import io.github.roman6666861.swdb.common.SwdbException;
+import io.github.roman6666861.swdb.sql.schema.SwdbSchema;
 import org.apache.calcite.avatica.util.Casing;
 import org.apache.calcite.avatica.util.Quoting;
 import org.apache.calcite.config.CalciteConnectionProperty;
+import org.apache.calcite.jdbc.CalciteConnection;
 import org.apache.calcite.jdbc.Driver;
+import org.apache.calcite.schema.SchemaPlus;
 import org.apache.calcite.sql.parser.SqlParser;
+import org.apache.calcite.sql.parser.ddl.SqlDdlParserImpl;
 
-import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.Properties;
 
@@ -19,18 +23,28 @@ public final class SqlEngine {
 
     private static final String URL = "jdbc:calcite:";
 
+    private final Catalog catalog;
     private final Driver driver = new Driver();
     private final Properties properties = postgresLikeProperties();
     private final SqlParser.Config parserConfig = SqlParser.config()
+            .withParserFactory(SqlDdlParserImpl.FACTORY)
             .withUnquotedCasing(Casing.TO_LOWER)
             .withQuotedCasing(Casing.UNCHANGED)
             .withQuoting(Quoting.DOUBLE_QUOTE)
             .withCaseSensitive(true);
 
+    public SqlEngine(Catalog catalog) {
+        this.catalog = catalog;
+    }
+
     public SqlSession openSession() {
         try {
-            Connection connection = driver.connect(URL, properties);
-            return new SqlSession(connection, parserConfig);
+            CalciteConnection connection = driver.connect(URL, properties).unwrap(CalciteConnection.class);
+            SchemaPlus schema = connection.getRootSchema().add(SwdbSchema.NAME, new SwdbSchema(catalog));
+            // Без кэша Calcite спрашивает список таблиц у схемы при каждом запросе и видит свежий DDL.
+            schema.setCacheEnabled(false);
+            connection.setSchema(SwdbSchema.NAME);
+            return new SqlSession(connection, parserConfig, new DdlExecutor(catalog));
         } catch (SQLException e) {
             throw new SwdbException(SqlStates.INTERNAL_ERROR, "cannot open SQL session: " + e.getMessage(), e);
         }

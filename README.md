@@ -20,6 +20,30 @@ psql -h 127.0.0.1 -p 5432 -c "SELECT 1"
 JDBC: `jdbc:postgresql://127.0.0.1:5432/swdb?preferQueryMode=simple`
 (extended query protocol пока не поддерживается).
 
+## Что поддерживается
+
+```sql
+CREATE TABLE employees (
+  id INT,
+  name VARCHAR(50) NOT NULL,
+  salary DECIMAL(10, 2),
+  hired DATE,
+  PRIMARY KEY (id)
+);
+INSERT INTO employees VALUES (1, 'Alice', 4800.50, DATE '2022-07-15');
+SELECT name, salary FROM employees WHERE salary > 4000 ORDER BY salary DESC;
+DELETE FROM employees WHERE hired IS NULL;
+DROP TABLE IF EXISTS employees;
+```
+
+- `CREATE TABLE [IF NOT EXISTS]`, `DROP TABLE [IF EXISTS]`, `INSERT` (в том числе `INSERT ... SELECT`), `DELETE`;
+- `SELECT` с `WHERE`, `JOIN`, `GROUP BY`, агрегатами, `ORDER BY`, подзапросами, CTE, оконными функциями;
+- типы: `BOOLEAN`, `INT`, `BIGINT`, `DOUBLE`, `DECIMAL(p, s)`, `VARCHAR(n)`/`TEXT`, `DATE`, `TIMESTAMP`;
+- `PRIMARY KEY` (обязателен, можно составной), `NOT NULL`; данные хранятся в RocksDB и переживают перезапуск.
+
+Пока не поддерживаются: `UPDATE`, `PRIMARY KEY` в объявлении колонки (`id INT PRIMARY KEY`),
+`DEFAULT`, `UNIQUE`, вторичные индексы, транзакции, пользователи и пароли.
+
 ## Модули
 
 | Модуль | Назначение |

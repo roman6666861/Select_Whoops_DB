@@ -29,9 +29,28 @@ public final class JdbcExample {
                 execute(connection, String.join(" ", args));
                 return;
             }
-            execute(connection, "SELECT 40 + 2 AS answer, UPPER('select whoops') AS name, CURRENT_DATE AS today");
-            execute(connection, "VALUES (1, 'alpha'), (2, 'beta'), (3, 'gamma')");
-            execute(connection, "SELEKT 1");
+            execute(connection, "DROP TABLE IF EXISTS employees");
+            execute(connection, """
+                    CREATE TABLE employees (
+                      id INT,
+                      name VARCHAR(50) NOT NULL,
+                      department VARCHAR(20),
+                      salary DECIMAL(10, 2),
+                      hired DATE,
+                      PRIMARY KEY (id))""");
+            execute(connection, """
+                    INSERT INTO employees VALUES
+                      (3, 'Carol', 'dev', 5200.00, DATE '2024-03-01'),
+                      (1, 'Alice', 'dev', 4800.50, DATE '2022-07-15'),
+                      (2, 'Bob',   'ops', 3900.00, DATE '2023-01-10'),
+                      (4, 'Dave',  'ops', 4100.00, NULL)""");
+            execute(connection, "SELECT id, name, department, salary, hired FROM employees");
+            execute(connection, """
+                    SELECT department, COUNT(*) AS people, AVG(salary) AS avg_salary
+                    FROM employees GROUP BY department ORDER BY department""");
+            execute(connection, "DELETE FROM employees WHERE hired IS NULL");
+            execute(connection, "INSERT INTO employees VALUES (1, 'Duplicate', 'dev', 1, NULL)");
+            execute(connection, "SELECT name FROM employees WHERE salary > 4000 ORDER BY salary DESC");
         }
     }
 

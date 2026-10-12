@@ -5,4 +5,5 @@ plugins {
 dependencies {
     api project(':swdb-catalog')
     implementation libs.calcite.core
+    implementation libs.calcite.server
 }
