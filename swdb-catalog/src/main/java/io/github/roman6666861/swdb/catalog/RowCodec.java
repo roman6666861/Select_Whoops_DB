@@ -13,6 +13,7 @@ import java.io.UncheckedIOException;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -56,15 +57,35 @@ final class RowCodec {
     }
 
     byte[] encodeKey(Object[] row) {
-        KeyBuilder key = Keys.data(table.id());
+        List<Object> values = new ArrayList<>(table.primaryKey().size());
         for (int index : table.primaryKey()) {
-            Object value = row[index];
-            switch (table.columns().get(index).type()) {
+            values.add(row[index]);
+        }
+        return encodeKeyPrefix(values);
+    }
+
+    /**
+     * Ключ из значений первых колонок первичного ключа. Если значений меньше, чем колонок в ключе,
+     * получается префикс: с него начинаются ключи всех строк с такими значениями.
+     * <p>
+     * Числа приводятся к типу колонки (так {@code Long 5} подходит для INTEGER), поэтому
+     * вызывающий должен передавать только значения, которые точно представимы в этом типе.
+     */
+    byte[] encodeKeyPrefix(List<Object> values) {
+        List<Integer> primaryKey = table.primaryKey();
+        if (values.size() > primaryKey.size()) {
+            throw new IllegalArgumentException("table " + table.name() + " has " + primaryKey.size()
+                    + " primary key columns, got " + values.size() + " values");
+        }
+        KeyBuilder key = Keys.data(table.id());
+        for (int i = 0; i < values.size(); i++) {
+            Object value = values.get(i);
+            switch (table.columns().get(primaryKey.get(i)).type()) {
                 case BOOLEAN -> key.appendBoolean((Boolean) value);
-                case INTEGER, DATE -> key.appendInt((Integer) value);
-                case BIGINT, TIMESTAMP -> key.appendLong((Long) value);
-                case DOUBLE -> key.appendDouble((Double) value);
-                case VARCHAR -> key.appendString((String) value);
+                case INTEGER, DATE -> key.appendInt(((Number) value).intValue());
+                case BIGINT, TIMESTAMP -> key.appendLong(((Number) value).longValue());
+                case DOUBLE -> key.appendDouble(((Number) value).doubleValue());
+                case VARCHAR -> key.appendString(value.toString());
                 case DECIMAL -> throw new IllegalStateException("DECIMAL is not allowed in primary key");
             }
         }
