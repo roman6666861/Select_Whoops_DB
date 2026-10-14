@@ -4,34 +4,36 @@ import io.github.roman6666861.swdb.catalog.RowCursor;
 import io.github.roman6666861.swdb.catalog.TableStore;
 import org.apache.calcite.linq4j.Enumerator;
 
+import java.util.function.Function;
+
 /**
  * Потоковое чтение таблицы для Calcite: строки читаются из RocksDB по одной,
  * без загрузки всей таблицы в память.
- * <p>
- * Формат строки зависит от числа колонок: у таблицы из одной колонки Calcite ждёт само значение
- * (формат SCALAR), у остальных — массив {@code Object[]} (формат ARRAY).
+ *
+ * @param <T> во что Calcite ждёт превратить строку {@code Object[]} (см. {@code rowFormat})
  */
-final class RowEnumerator implements Enumerator<Object> {
+final class RowEnumerator<T> implements Enumerator<T> {
 
     private final TableStore store;
-    private final boolean scalar;
+    private final KeyRange range;
+    private final Function<Object[], T> rowFormat;
     private RowCursor cursor;
 
-    RowEnumerator(TableStore store) {
+    RowEnumerator(TableStore store, KeyRange range, Function<Object[], T> rowFormat) {
         this.store = store;
-        this.scalar = store.table().columns().size() == 1;
+        this.range = range;
+        this.rowFormat = rowFormat;
     }
 
     @Override
-    public Object current() {
-        Object[] row = cursor.row();
-        return scalar ? row[0] : row;
+    public T current() {
+        return rowFormat.apply(cursor.row());
     }
 
     @Override
     public boolean moveNext() {
         if (cursor == null) {
-            cursor = store.scan();
+            cursor = store.scan(range.lower(), range.upper());
         }
         return cursor.next();
     }

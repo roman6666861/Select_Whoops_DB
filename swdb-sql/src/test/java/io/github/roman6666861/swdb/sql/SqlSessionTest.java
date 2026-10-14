@@ -198,6 +198,41 @@ class SqlSessionTest {
     }
 
     @Test
+    void whereByPrimaryKey() {
+        session.execute("CREATE TABLE t (id INT, name VARCHAR(5), v INT, PRIMARY KEY (id))");
+        session.execute("INSERT INTO t VALUES (1, 'a', 10), (2, 'b', 20), (3, 'c', 30)");
+
+        assertThat(rows("SELECT name FROM t WHERE id = 2")).containsExactly(List.of("b"));
+        assertThat(rows("SELECT name FROM t WHERE 2 = id")).containsExactly(List.of("b"));
+        assertThat(rows("SELECT name FROM t WHERE id = 4")).isEmpty();
+        // Условие не по ключу остаётся Calcite и проверяется для найденной строки.
+        assertThat(rows("SELECT name FROM t WHERE id = 2 AND v = 20")).containsExactly(List.of("b"));
+        assertThat(rows("SELECT name FROM t WHERE id = 2 AND v = 99")).isEmpty();
+        // Значения, которых не может быть в колонке: Calcite оборачивает колонку в CAST, ключ не используется.
+        assertThat(rows("SELECT name FROM t WHERE id = 2.5")).isEmpty();
+        assertThat(rows("SELECT name FROM t WHERE id = 3000000000")).isEmpty();
+
+        assertThat(session.execute("DELETE FROM t WHERE id = 2")).isEqualTo(new StatementResult.Update("DELETE", 1));
+        assertThat(rows("SELECT id FROM t")).containsExactly(List.of(1), List.of(3));
+    }
+
+    @Test
+    void whereByCompositeAndStringPrimaryKey() {
+        session.execute("CREATE TABLE events (d DATE, seq INT, note VARCHAR(10), PRIMARY KEY (d, seq))");
+        session.execute("""
+                INSERT INTO events VALUES
+                  (DATE '2026-10-10', 1, 'a'), (DATE '2026-10-10', 2, 'b'), (DATE '2026-10-11', 1, 'c')""");
+        session.execute("CREATE TABLE tags (name VARCHAR(5), PRIMARY KEY (name))");
+        session.execute("INSERT INTO tags VALUES ('x'), ('y')");
+
+        assertThat(rows("SELECT note FROM events WHERE seq = 1 AND d = DATE '2026-10-11'")).containsExactly(List.of("c"));
+        // Только часть составного ключа: пока читается вся таблица, результат тот же.
+        assertThat(rows("SELECT note FROM events WHERE d = DATE '2026-10-10'")).containsExactly(List.of("a"), List.of("b"));
+        assertThat(rows("SELECT name FROM tags WHERE name = 'y'")).containsExactly(List.of("y"));
+        assertThat(rows("SELECT name FROM tags WHERE name = 'too long'")).isEmpty();
+    }
+
+    @Test
     void explainShowsPlanLineByLine() {
         session.execute("CREATE TABLE t (id INT, v INT, PRIMARY KEY (id))");
 
@@ -207,7 +242,9 @@ class SqlSessionTest {
             assertThat(result).isInstanceOfSatisfying(StatementResult.Rows.class, rows -> {
                 assertThat(rows.columns()).extracting(Column::name).containsExactly("QUERY PLAN");
                 assertThat(rows.rows()).hasSizeGreaterThan(1);
-                assertThat(rows.rows().getLast().getFirst()).asString().contains("EnumerableTableScan(table=[[public, t]])");
+                // Условие передано в таблицу: она сама решит, какие строки читать.
+                assertThat(rows.rows().getLast().getFirst()).asString()
+                        .contains("BindableTableScan(table=[[public, t]], filters=[[=($0, 5)]])");
             });
         }
     }
