@@ -277,6 +277,19 @@ class SqlSessionTest {
     }
 
     @Test
+    void unicodeStrings() {
+        // VARCHAR(4): длина считается в символах, а не в байтах ('ёжик' в UTF-8 — 8 байт).
+        session.execute("CREATE TABLE words (w VARCHAR(4), lang VARCHAR(5), PRIMARY KEY (w))");
+        session.execute("INSERT INTO words VALUES ('ёжик', 'ru'), ('日本', 'ja'), ('😀', 'emoji'), ('cat', 'en')");
+
+        assertThat(rows("SELECT lang FROM words WHERE w = 'ёжик'")).containsExactly(List.of("ru"));
+        assertThat(rows("SELECT w FROM words WHERE lang = 'ja'")).containsExactly(List.of("日本"));
+        assertThat(rows("SELECT w FROM words WHERE lang = 'emoji'")).containsExactly(List.of("😀"));
+        assertThat(rows("SELECT w FROM words WHERE w LIKE 'ё%'")).containsExactly(List.of("ёжик"));
+        assertThat(rows("SELECT UPPER(w) FROM words WHERE lang = 'ru'")).containsExactly(List.of("ЁЖИК"));
+    }
+
+    @Test
     void explainShowsPlanLineByLine() {
         session.execute("CREATE TABLE t (id INT, v INT, PRIMARY KEY (id))");
 
