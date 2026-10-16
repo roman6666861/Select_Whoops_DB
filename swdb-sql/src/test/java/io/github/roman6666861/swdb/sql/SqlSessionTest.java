@@ -226,10 +226,54 @@ class SqlSessionTest {
         session.execute("INSERT INTO tags VALUES ('x'), ('y')");
 
         assertThat(rows("SELECT note FROM events WHERE seq = 1 AND d = DATE '2026-10-11'")).containsExactly(List.of("c"));
-        // Только часть составного ключа: пока читается вся таблица, результат тот же.
+        // Только первая колонка составного ключа: читаются все строки с этим d.
         assertThat(rows("SELECT note FROM events WHERE d = DATE '2026-10-10'")).containsExactly(List.of("a"), List.of("b"));
         assertThat(rows("SELECT name FROM tags WHERE name = 'y'")).containsExactly(List.of("y"));
         assertThat(rows("SELECT name FROM tags WHERE name = 'too long'")).isEmpty();
+    }
+
+    @Test
+    void whereByPrimaryKeyRange() {
+        session.execute("CREATE TABLE t (id INT, v INT, PRIMARY KEY (id))");
+        session.execute("INSERT INTO t VALUES (-3, 0), (1, 10), (2, 20), (3, 30), (4, 40), (10, 100)");
+
+        assertThat(ids("SELECT id FROM t WHERE id > 2")).containsExactly(3, 4, 10);
+        assertThat(ids("SELECT id FROM t WHERE id >= 2")).containsExactly(2, 3, 4, 10);
+        assertThat(ids("SELECT id FROM t WHERE id < 2")).containsExactly(-3, 1);
+        assertThat(ids("SELECT id FROM t WHERE 2 >= id")).containsExactly(-3, 1, 2);
+        assertThat(ids("SELECT id FROM t WHERE id BETWEEN 2 AND 4")).containsExactly(2, 3, 4);
+        assertThat(ids("SELECT id FROM t WHERE id > 1 AND id < 4")).containsExactly(2, 3);
+        assertThat(ids("SELECT id FROM t WHERE id > 1 AND id < 4 AND v <> 20")).containsExactly(3);
+        assertThat(ids("SELECT id FROM t WHERE id > 4 AND id < 2")).isEmpty();
+        // IN — несколько точек, читается вся таблица; результат тот же.
+        assertThat(ids("SELECT id FROM t WHERE id IN (1, 10)")).containsExactly(1, 10);
+
+        assertThat(session.execute("DELETE FROM t WHERE id BETWEEN 2 AND 3")).isEqualTo(new StatementResult.Update("DELETE", 2));
+        assertThat(ids("SELECT id FROM t")).containsExactly(-3, 1, 4, 10);
+    }
+
+    @Test
+    void whereByCompositeKeyPrefixAndRange() {
+        session.execute("CREATE TABLE events (d DATE, seq INT, PRIMARY KEY (d, seq))");
+        session.execute("""
+                INSERT INTO events VALUES
+                  (DATE '2026-10-09', 9), (DATE '2026-10-10', 1), (DATE '2026-10-10', 2),
+                  (DATE '2026-10-10', 3), (DATE '2026-10-11', 1)""");
+
+        assertThat(ids("SELECT seq FROM events WHERE d = DATE '2026-10-10' AND seq >= 2")).containsExactly(2, 3);
+        assertThat(ids("SELECT seq FROM events WHERE d = DATE '2026-10-10' AND seq < 3")).containsExactly(1, 2);
+        assertThat(ids("SELECT seq FROM events WHERE d > DATE '2026-10-09'")).containsExactly(1, 2, 3, 1);
+        assertThat(ids("SELECT seq FROM events WHERE d BETWEEN DATE '2026-10-09' AND DATE '2026-10-10' AND seq = 1"))
+                .containsExactly(1);
+        assertThat(ids("SELECT seq FROM events WHERE seq = 1")).containsExactly(1, 1);
+    }
+
+    @Test
+    void varcharKeyRangeIsCheckedByCalcite() {
+        session.execute("CREATE TABLE tags (name VARCHAR(5), PRIMARY KEY (name))");
+        session.execute("INSERT INTO tags VALUES ('a'), ('ab'), ('abc'), ('b')");
+
+        assertThat(rows("SELECT name FROM tags WHERE name > 'ab' AND name <= 'b'")).containsExactly(List.of("abc"), List.of("b"));
     }
 
     @Test
@@ -272,6 +316,11 @@ class SqlSessionTest {
                     return List.copyOf(row.subList(0, end));
                 })
                 .toList();
+    }
+
+    /** Первая колонка результата — целые числа. */
+    private List<Integer> ids(String sql) {
+        return rows(sql).stream().map(row -> (Integer) row.getFirst()).toList();
     }
 
     private static void assertSqlState(Runnable action, String sqlState) {

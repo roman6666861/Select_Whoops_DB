@@ -17,6 +17,7 @@ import org.apache.calcite.rel.core.TableModify;
 import org.apache.calcite.rel.logical.LogicalTableModify;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.RelDataTypeFactory;
+import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.schema.FilterableTable;
 import org.apache.calcite.schema.ModifiableTable;
@@ -73,7 +74,7 @@ final class SwdbTable extends AbstractQueryableTable implements ModifiableTable,
      */
     @Override
     public Enumerable<Object[]> scan(DataContext root, List<RexNode> filters) {
-        KeyRange range = KeyConditions.extract(store.table(), filters);
+        KeyRange range = KeyConditions.extract(store.table(), filters, new RexBuilder(root.getTypeFactory()));
         return new AbstractEnumerable<>() {
             @Override
             public Enumerator<Object[]> enumerator() {

@@ -10,6 +10,7 @@ import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.rex.RexLiteral;
 import org.apache.calcite.rex.RexNode;
+import org.apache.calcite.sql.SqlOperator;
 import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.junit.jupiter.api.Test;
@@ -18,6 +19,11 @@ import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
 
+import static org.apache.calcite.sql.fun.SqlStdOperatorTable.EQUALS;
+import static org.apache.calcite.sql.fun.SqlStdOperatorTable.GREATER_THAN;
+import static org.apache.calcite.sql.fun.SqlStdOperatorTable.GREATER_THAN_OR_EQUAL;
+import static org.apache.calcite.sql.fun.SqlStdOperatorTable.LESS_THAN;
+import static org.apache.calcite.sql.fun.SqlStdOperatorTable.LESS_THAN_OR_EQUAL;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -36,34 +42,36 @@ class KeyConditionsTest {
             new ColumnDef("seq", ColumnType.INTEGER, -1, -1, false),
             new ColumnDef("note", ColumnType.VARCHAR, 10, -1, true)), List.of(0, 1));
 
+    /** {@code tags(name VARCHAR(5), PRIMARY KEY (name))}. */
+    private static final TableDef TAGS = new TableDef(3, "tags", List.of(
+            new ColumnDef("name", ColumnType.VARCHAR, 5, -1, false)), List.of(0));
+
     private final RelDataTypeFactory types = new JavaTypeFactoryImpl();
     private final RexBuilder rex = new RexBuilder(types);
 
+    // ---- равенство ----
+
     @Test
     void equalityOnPrimaryKeyBecomesSingleKeyRange() {
-        List<RexNode> filters = list(eq(intColumn(0), literal(5)));
+        List<RexNode> filters = list(call(EQUALS, column(0), literal(5)));
 
-        KeyRange range = KeyConditions.extract(T, filters);
+        KeyRange range = extract(T, filters);
 
-        assertThat(range).isEqualTo(new KeyRange(KeyBound.inclusive(5), KeyBound.inclusive(5)));
+        assertThat(range).isEqualTo(point(5));
         assertThat(filters).as("условие выполнено таблицей и больше не нужно Calcite").isEmpty();
     }
 
     @Test
     void literalOnTheLeftSide() {
-        assertThat(KeyConditions.extract(T, list(eq(literal(5), intColumn(0)))))
-                .isEqualTo(new KeyRange(KeyBound.inclusive(5), KeyBound.inclusive(5)));
+        assertThat(extract(T, list(call(EQUALS, literal(5), column(0))))).isEqualTo(point(5));
     }
 
     @Test
     void otherConditionsStayForCalcite() {
-        RexNode idEq = eq(intColumn(0), literal(5));
-        RexNode vLess = rex.makeCall(SqlStdOperatorTable.LESS_THAN, intColumn(1), literal(100));
-        List<RexNode> filters = list(idEq, vLess);
+        RexNode vLess = call(LESS_THAN, column(1), literal(100));
+        List<RexNode> filters = list(call(EQUALS, column(0), literal(5)), vLess);
 
-        KeyRange range = KeyConditions.extract(T, filters);
-
-        assertThat(range.lower()).isEqualTo(KeyBound.inclusive(5));
+        assertThat(extract(T, filters)).isEqualTo(point(5));
         assertThat(filters).containsExactly(vLess);
     }
 
@@ -71,60 +79,151 @@ class KeyConditionsTest {
     void andIsUsedForRangeButKeptWhole() {
         // Calcite запрещает возвращать условия, которых не было в списке, поэтому AND нельзя
         // разрезать и оставить только v < 100: он остаётся целиком, но ключ всё равно используется.
-        RexNode and = rex.makeCall(SqlStdOperatorTable.AND, eq(intColumn(0), literal(5)),
-                rex.makeCall(SqlStdOperatorTable.LESS_THAN, intColumn(1), literal(100)));
+        RexNode and = call(SqlStdOperatorTable.AND, call(EQUALS, column(0), literal(5)),
+                call(LESS_THAN, column(1), literal(100)));
         List<RexNode> filters = list(and);
 
-        assertThat(KeyConditions.extract(T, filters)).isEqualTo(new KeyRange(KeyBound.inclusive(5), KeyBound.inclusive(5)));
+        assertThat(extract(T, filters)).isEqualTo(point(5));
         assertThat(filters).containsExactly(and);
     }
 
     @Test
     void conditionWithoutPrimaryKeyReadsWholeTable() {
-        RexNode vEq = eq(intColumn(1), literal(5));
+        RexNode vEq = call(EQUALS, column(1), literal(5));
         List<RexNode> filters = list(vEq);
 
-        assertThat(KeyConditions.extract(T, filters)).isEqualTo(KeyRange.ALL);
+        assertThat(extract(T, filters)).isEqualTo(KeyRange.ALL);
         assertThat(filters).containsExactly(vEq);
     }
 
     @Test
     void castColumnIsNotUsed() {
         // Так Calcite записывает id = 5.5: к DECIMAL приводится колонка, а не литерал.
-        RexNode cast = rex.makeCast(types.createSqlType(SqlTypeName.DECIMAL, 11, 1), intColumn(0));
-        List<RexNode> filters = list(eq(cast, rex.makeExactLiteral(new BigDecimal("5.5"))));
+        RexNode cast = rex.makeCast(types.createSqlType(SqlTypeName.DECIMAL, 11, 1), column(0));
+        List<RexNode> filters = list(call(EQUALS, cast, rex.makeExactLiteral(new BigDecimal("5.5"))));
 
-        assertThat(KeyConditions.extract(T, filters)).isEqualTo(KeyRange.ALL);
+        assertThat(extract(T, filters)).isEqualTo(KeyRange.ALL);
         assertThat(filters).hasSize(1);
     }
 
     @Test
-    void compositeKeyNeedsAllColumns() {
-        RexNode d = eq(intColumn(0), literal(10));
-        RexNode seq = eq(literal(2), intColumn(1));
-
-        assertThat(KeyConditions.extract(EVENTS, list(seq, d)))
-                .isEqualTo(new KeyRange(KeyBound.inclusive(10, 2), KeyBound.inclusive(10, 2)));
-
-        List<RexNode> onlyD = list(d);
-        assertThat(KeyConditions.extract(EVENTS, onlyD)).isEqualTo(KeyRange.ALL);
-        assertThat(onlyD).containsExactly(d);
-    }
-
-    @Test
-    void varcharKey() {
-        TableDef tags = new TableDef(3, "tags", List.of(new ColumnDef("name", ColumnType.VARCHAR, 5, -1, false)), List.of(0));
-        RelDataType varchar5 = types.createSqlType(SqlTypeName.VARCHAR, 5);
-        RexNode column = rex.makeInputRef(varchar5, 0);
-        // Строковый литерал имеет тип CHAR(3); Calcite в запросе приводит его к типу колонки.
-        RexNode literal = rex.makeCast(varchar5, rex.makeLiteral("ann"));
-        assertThat(literal).isInstanceOf(RexLiteral.class);
-
-        assertThat(KeyConditions.extract(tags, list(eq(column, literal))))
+    void varcharEquality() {
+        assertThat(extract(TAGS, list(call(EQUALS, varcharColumn(), varcharLiteral("ann")))))
                 .isEqualTo(new KeyRange(KeyBound.inclusive("ann"), KeyBound.inclusive("ann")));
     }
 
-    private RexNode intColumn(int index) {
+    // ---- диапазоны ----
+
+    @Test
+    void comparisonsBecomeOneSidedRanges() {
+        assertThat(extract(T, list(call(GREATER_THAN, column(0), literal(5)))))
+                .isEqualTo(new KeyRange(KeyBound.exclusive(5), null));
+        assertThat(extract(T, list(call(GREATER_THAN_OR_EQUAL, column(0), literal(5)))))
+                .isEqualTo(new KeyRange(KeyBound.inclusive(5), null));
+        assertThat(extract(T, list(call(LESS_THAN, column(0), literal(5)))))
+                .isEqualTo(new KeyRange(null, KeyBound.exclusive(5)));
+        assertThat(extract(T, list(call(LESS_THAN_OR_EQUAL, column(0), literal(5)))))
+                .isEqualTo(new KeyRange(null, KeyBound.inclusive(5)));
+        // 5 < id — то же, что id > 5.
+        assertThat(extract(T, list(call(LESS_THAN, literal(5), column(0)))))
+                .isEqualTo(new KeyRange(KeyBound.exclusive(5), null));
+    }
+
+    @Test
+    void twoComparisonsMakeRange() {
+        List<RexNode> filters = list(call(GREATER_THAN, column(0), literal(2)), call(LESS_THAN_OR_EQUAL, column(0), literal(6)));
+
+        assertThat(extract(T, filters)).isEqualTo(new KeyRange(KeyBound.exclusive(2), KeyBound.inclusive(6)));
+        assertThat(filters).isEmpty();
+    }
+
+    @Test
+    void secondBoundOnSameSideStaysForCalcite() {
+        RexNode gt2 = call(GREATER_THAN, column(0), literal(2));
+        RexNode gt5 = call(GREATER_THAN, column(0), literal(5));
+        List<RexNode> filters = list(gt2, gt5);
+
+        assertThat(extract(T, filters)).isEqualTo(new KeyRange(KeyBound.exclusive(2), null));
+        assertThat(filters).containsExactly(gt5);
+    }
+
+    @Test
+    void betweenIsSearchWithOneRange() {
+        // Так Calcite записывает BETWEEN 2 AND 6: SEARCH($0, Sarg[[2..6]]).
+        RexNode between = rex.makeBetween(column(0), literal(2), literal(6));
+        assertThat(between.getKind().name()).isEqualTo("SEARCH");
+        List<RexNode> filters = list(between);
+
+        assertThat(extract(T, filters)).isEqualTo(new KeyRange(KeyBound.inclusive(2), KeyBound.inclusive(6)));
+        assertThat(filters).isEmpty();
+    }
+
+    @Test
+    void inListIsNotUsed() {
+        // IN (1, 7) — SEARCH из двух точек, раскрывается в OR: одним диапазоном его не прочитать.
+        RexNode in = rex.makeIn(column(0), List.of(literal(1), literal(7)));
+        List<RexNode> filters = list(in);
+
+        assertThat(extract(T, filters)).isEqualTo(KeyRange.ALL);
+        assertThat(filters).containsExactly(in);
+    }
+
+    @Test
+    void varcharRangeIsNotUsed() {
+        // Порядок ключей (UTF-8) и сравнение строк в Calcite (UTF-16) расходятся для части символов.
+        List<RexNode> filters = list(call(GREATER_THAN, varcharColumn(), varcharLiteral("a")));
+
+        assertThat(extract(TAGS, filters)).isEqualTo(KeyRange.ALL);
+        assertThat(filters).hasSize(1);
+    }
+
+    // ---- составной ключ ----
+
+    @Test
+    void compositeKeyFullEquality() {
+        assertThat(extract(EVENTS, list(call(EQUALS, literal(2), column(1)), call(EQUALS, column(0), literal(10)))))
+                .isEqualTo(new KeyRange(KeyBound.inclusive(10, 2), KeyBound.inclusive(10, 2)));
+    }
+
+    @Test
+    void compositeKeyPrefix() {
+        List<RexNode> filters = list(call(EQUALS, column(0), literal(10)));
+
+        assertThat(extract(EVENTS, filters)).isEqualTo(point(10));
+        assertThat(filters).isEmpty();
+    }
+
+    @Test
+    void compositeKeyPrefixAndRange() {
+        List<RexNode> filters = list(call(EQUALS, column(0), literal(10)), call(GREATER_THAN, column(1), literal(5)));
+
+        assertThat(extract(EVENTS, filters)).isEqualTo(new KeyRange(KeyBound.exclusive(10, 5), KeyBound.inclusive(10)));
+        assertThat(filters).isEmpty();
+    }
+
+    @Test
+    void rangeOnFirstColumnStopsAtIt() {
+        RexNode seqEq = call(EQUALS, column(1), literal(5));
+        List<RexNode> filters = list(call(GREATER_THAN, column(0), literal(10)), seqEq);
+
+        assertThat(extract(EVENTS, filters)).isEqualTo(new KeyRange(KeyBound.exclusive(10), null));
+        assertThat(filters).as("seq = 5 после диапазона по d ключом не ограничить").containsExactly(seqEq);
+    }
+
+    @Test
+    void secondColumnAloneReadsWholeTable() {
+        assertThat(extract(EVENTS, list(call(EQUALS, column(1), literal(5))))).isEqualTo(KeyRange.ALL);
+    }
+
+    private KeyRange extract(TableDef table, List<RexNode> filters) {
+        return KeyConditions.extract(table, filters, rex);
+    }
+
+    private static KeyRange point(Object value) {
+        return new KeyRange(KeyBound.inclusive(value), KeyBound.inclusive(value));
+    }
+
+    private RexNode column(int index) {
         return rex.makeInputRef(types.createSqlType(SqlTypeName.INTEGER), index);
     }
 
@@ -132,8 +231,23 @@ class KeyConditionsTest {
         return rex.makeExactLiteral(BigDecimal.valueOf(value));
     }
 
-    private RexNode eq(RexNode left, RexNode right) {
-        return rex.makeCall(SqlStdOperatorTable.EQUALS, left, right);
+    private RexNode varcharColumn() {
+        return rex.makeInputRef(varchar5(), 0);
+    }
+
+    /** Строковый литерал имеет тип CHAR(n); Calcite в запросе приводит его к типу колонки. */
+    private RexNode varcharLiteral(String value) {
+        RexNode literal = rex.makeCast(varchar5(), rex.makeLiteral(value));
+        assertThat(literal).isInstanceOf(RexLiteral.class);
+        return literal;
+    }
+
+    private RelDataType varchar5() {
+        return types.createSqlType(SqlTypeName.VARCHAR, 5);
+    }
+
+    private RexNode call(SqlOperator operator, RexNode... operands) {
+        return rex.makeCall(operator, operands);
     }
 
     /** Изменяемый список: KeyConditions удаляет из него выполненные условия. */
