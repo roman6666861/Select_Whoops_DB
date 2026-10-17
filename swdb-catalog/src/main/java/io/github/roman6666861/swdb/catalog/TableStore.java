@@ -5,11 +5,16 @@ import io.github.roman6666861.swdb.common.SwdbException;
 import io.github.roman6666861.swdb.storage.KeyBuilder;
 import io.github.roman6666861.swdb.storage.KvStore;
 
+import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 /**
- * Данные одной таблицы: вставка, удаление и чтение строк.
+ * Данные одной таблицы: вставка, замена, удаление и чтение строк.
  * <p>
  * Пока без транзакций: каждая операция над строкой атомарна сама по себе, а проверка
  * уникальности первичного ключа защищена блокировкой таблицы в пределах процесса.
@@ -38,8 +43,7 @@ public final class TableStore {
         byte[] value = codec.encodeValue(normalized);
         synchronized (lock) {
             if (store.get(key) != null) {
-                throw new SwdbException(SqlStates.UNIQUE_VIOLATION,
-                        "duplicate key value violates unique constraint \"" + table.name() + "_pkey\"");
+                throw duplicateKey();
             }
             store.put(key, value);
             if (rowCount >= 0) {
@@ -60,6 +64,58 @@ public final class TableStore {
                 rowCount--;
             }
             return true;
+        }
+    }
+
+    /** Замена одной строки: {@code before} — как она лежит в таблице, {@code after} — какой станет. */
+    public record Change(Object[] before, Object[] after) {
+    }
+
+    /**
+     * Заменяет строки; все замены записываются одним атомарным пакетом: либо все, либо ни одной.
+     * <p>
+     * Если меняется первичный ключ, строка переезжает: старый ключ удаляется, новый записывается.
+     * Уникальность проверяется для итогового состояния, поэтому {@code id = id + 1} проходит,
+     * хотя новый ключ одной строки совпадает со старым ключом другой. Строка, которую успели
+     * удалить с момента чтения, пропускается.
+     *
+     * @return число заменённых строк
+     */
+    public long update(List<Change> changes) {
+        record Prepared(byte[] oldKey, byte[] newKey, byte[] value) {
+            boolean moves() {
+                return !Arrays.equals(oldKey, newKey);
+            }
+        }
+        List<Prepared> prepared = new ArrayList<>(changes.size());
+        for (Change change : changes) {
+            Object[] after = codec.normalize(change.after());
+            prepared.add(new Prepared(codec.encodeKey(codec.normalize(change.before())),
+                    codec.encodeKey(after), codec.encodeValue(after)));
+        }
+        synchronized (lock) {
+            prepared.removeIf(p -> store.get(p.oldKey()) == null);
+            // ByteBuffer сравнивается по содержимому, поэтому годится как ключ множества.
+            Set<ByteBuffer> freed = new HashSet<>();
+            for (Prepared p : prepared) {
+                if (p.moves()) {
+                    freed.add(ByteBuffer.wrap(p.oldKey()));
+                }
+            }
+            Set<ByteBuffer> taken = new HashSet<>();
+            for (Prepared p : prepared) {
+                ByteBuffer newKey = ByteBuffer.wrap(p.newKey());
+                boolean occupied = p.moves() && store.get(p.newKey()) != null && !freed.contains(newKey);
+                if (!taken.add(newKey) || occupied) {
+                    throw duplicateKey();
+                }
+            }
+            // Сначала все удаления, потом все записи: строка может занять ключ, освобождённый другой.
+            store.write(batch -> {
+                prepared.stream().filter(Prepared::moves).forEach(p -> batch.delete(p.oldKey()));
+                prepared.forEach(p -> batch.put(p.newKey(), p.value()));
+            });
+            return prepared.size();
         }
     }
 
@@ -100,6 +156,11 @@ public final class TableStore {
         byte[] to = upper == null ? KeyBuilder.prefixEnd(Keys.dataPrefix(table.id()))
                 : upper.inclusive() ? KeyBuilder.prefixEnd(key(upper)) : key(upper);
         return new RowCursor(store.scan(from, to), codec);
+    }
+
+    private SwdbException duplicateKey() {
+        return new SwdbException(SqlStates.UNIQUE_VIOLATION,
+                "duplicate key value violates unique constraint \"" + table.name() + "_pkey\"");
     }
 
     private byte[] key(KeyBound bound) {

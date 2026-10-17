@@ -1,5 +1,7 @@
 package io.github.roman6666861.swdb.catalog;
 
+import io.github.roman6666861.swdb.common.SqlStates;
+import io.github.roman6666861.swdb.common.SwdbException;
 import io.github.roman6666861.swdb.storage.KvStore;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -11,9 +13,10 @@ import java.util.ArrayList;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * Чтение по первичному ключу: точечное и по диапазону.
+ * Чтение по первичному ключу (точечное и по диапазону) и замена строк.
  */
 class TableStoreTest {
 
@@ -102,6 +105,78 @@ class TableStoreTest {
         assertThat(rows(t.scan(KeyBound.inclusive(2, 2), KeyBound.inclusive(2))))
                 .containsExactly(List.of(2, 2), List.of(2, 3));
         assertThat(t.get(3, 1)).isPresent();
+    }
+
+    @Test
+    void updateKeepingKeyReplacesRow() {
+        TableStore t = intTable(1, 2);
+
+        assertThat(t.update(List.of(change(1, "v1", 1, "x")))).isEqualTo(1);
+
+        assertThat(rows(t.scan())).containsExactly(List.of(1, "x"), List.of(2, "v2"));
+        assertThat(t.rowCount()).isEqualTo(2);
+    }
+
+    @Test
+    void updateOfPrimaryKeyMovesRow() {
+        TableStore t = intTable(1, 2);
+
+        t.update(List.of(change(1, "v1", 5, "v1")));
+
+        assertThat(rows(t.scan())).containsExactly(List.of(2, "v2"), List.of(5, "v1"));
+        assertThat(t.get(1)).isEmpty();
+        assertThat(t.rowCount()).isEqualTo(2);
+    }
+
+    @Test
+    void keysCanBeShiftedOntoEachOther() {
+        TableStore t = intTable(1, 2, 3);
+
+        // Как UPDATE t SET id = id + 1: ключ 2 занят, пока его не освободит вторая строка.
+        t.update(List.of(change(1, "v1", 2, "v1"), change(2, "v2", 3, "v2"), change(3, "v3", 4, "v3")));
+
+        assertThat(rows(t.scan())).containsExactly(List.of(2, "v1"), List.of(3, "v2"), List.of(4, "v3"));
+    }
+
+    @Test
+    void duplicateKeyRejectsWholeUpdate() {
+        TableStore t = intTable(1, 2, 3);
+
+        // Ключ 3 занят строкой, которая не меняется.
+        assertThatThrownBy(() -> t.update(List.of(change(1, "v1", 0, "v1"), change(2, "v2", 3, "v2"))))
+                .isInstanceOfSatisfying(SwdbException.class,
+                        e -> assertThat(e.sqlState()).isEqualTo(SqlStates.UNIQUE_VIOLATION));
+        // Две строки на один ключ.
+        assertThatThrownBy(() -> t.update(List.of(change(1, "v1", 7, "v1"), change(2, "v2", 7, "v2"))))
+                .isInstanceOfSatisfying(SwdbException.class,
+                        e -> assertThat(e.sqlState()).isEqualTo(SqlStates.UNIQUE_VIOLATION));
+
+        assertThat(rows(t.scan())).containsExactly(List.of(1, "v1"), List.of(2, "v2"), List.of(3, "v3"));
+    }
+
+    @Test
+    void invalidValueRejectsWholeUpdate() {
+        TableStore t = intTable(1, 2);
+
+        assertThatThrownBy(() -> t.update(List.of(change(1, "v1", 1, "ok"), change(2, "v2", 2, "far too long"))))
+                .isInstanceOfSatisfying(SwdbException.class,
+                        e -> assertThat(e.sqlState()).isEqualTo(SqlStates.STRING_DATA_RIGHT_TRUNCATION));
+
+        assertThat(rows(t.scan())).containsExactly(List.of(1, "v1"), List.of(2, "v2"));
+    }
+
+    @Test
+    void rowDeletedSinceReadIsSkipped() {
+        TableStore t = intTable(1, 2);
+        t.delete(new Object[]{1, "v1"});
+
+        assertThat(t.update(List.of(change(1, "v1", 1, "x"), change(2, "v2", 2, "y")))).isEqualTo(1);
+
+        assertThat(rows(t.scan())).containsExactly(List.of(2, "y"));
+    }
+
+    private static TableStore.Change change(int oldId, String oldV, int newId, String newV) {
+        return new TableStore.Change(new Object[]{oldId, oldV}, new Object[]{newId, newV});
     }
 
     /** Таблица {@code t(id INT, v VARCHAR)} со строками {@code (id, "v" + id)}. */
