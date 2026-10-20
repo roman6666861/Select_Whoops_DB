@@ -137,7 +137,8 @@ final class RowCodec {
             case DECIMAL -> value instanceof BigDecimal d ? d : new BigDecimal(value.toString());
             case VARCHAR -> {
                 String s = value.toString();
-                if (column.precision() != ColumnDef.UNSPECIFIED && s.length() > column.precision()) {
+                // Длина в символах Unicode, как в PostgreSQL: s.length() считает эмодзи за два.
+                if (column.precision() != ColumnDef.UNSPECIFIED && s.codePointCount(0, s.length()) > column.precision()) {
                     throw new SwdbException(SqlStates.STRING_DATA_RIGHT_TRUNCATION,
                             "value too long for type character varying(" + column.precision() + ")");
                 }

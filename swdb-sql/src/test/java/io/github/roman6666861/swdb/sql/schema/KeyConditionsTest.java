@@ -232,18 +232,18 @@ class KeyConditionsTest {
     }
 
     private RexNode varcharColumn() {
-        return rex.makeInputRef(varchar5(), 0);
+        return rex.makeInputRef(varchar(), 0);
     }
 
-    /** Строковый литерал имеет тип CHAR(n); Calcite в запросе приводит его к типу колонки. */
+    /** Строковый литерал имеет тип CHAR(n); Calcite в запросе приводит его к типу колонки — VARCHAR без длины (TypeMapping). */
     private RexNode varcharLiteral(String value) {
-        RexNode literal = rex.makeCast(varchar5(), rex.makeLiteral(value));
+        RexNode literal = rex.makeCast(varchar(), rex.makeLiteral(value));
         assertThat(literal).isInstanceOf(RexLiteral.class);
         return literal;
     }
 
-    private RelDataType varchar5() {
-        return types.createSqlType(SqlTypeName.VARCHAR, 5);
+    private RelDataType varchar() {
+        return types.createSqlType(SqlTypeName.VARCHAR);
     }
 
     private RexNode call(SqlOperator operator, RexNode... operands) {

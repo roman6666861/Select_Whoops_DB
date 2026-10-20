@@ -337,6 +337,35 @@ class SqlSessionTest {
     }
 
     @Test
+    void tooLongStringIsRejectedNotTruncated() {
+        session.execute("CREATE TABLE t (id INT, name VARCHAR(3), PRIMARY KEY (id))");
+        session.execute("INSERT INTO t VALUES (1, 'abc')");
+
+        assertSqlState(() -> session.execute("INSERT INTO t VALUES (2, 'abcd')"), SqlStates.STRING_DATA_RIGHT_TRUNCATION);
+        assertSqlState(() -> session.execute("INSERT INTO t SELECT 2, name || 'x' FROM t"), SqlStates.STRING_DATA_RIGHT_TRUNCATION);
+        assertSqlState(() -> session.execute("UPDATE t SET name = 'abcd'"), SqlStates.STRING_DATA_RIGHT_TRUNCATION);
+        assertThat(rows("SELECT id, name FROM t")).containsExactly(List.of(1, "abc"));
+
+        // Явный CAST обрезает, как и в PostgreSQL.
+        session.execute("INSERT INTO t VALUES (2, CAST('abcdef' AS VARCHAR(3)))");
+        // Длина — в символах Unicode: эмодзи один символ, хотя в Java это два char.
+        session.execute("INSERT INTO t VALUES (3, '😀😀😀')");
+        assertThat(rows("SELECT name FROM t WHERE id > 1")).containsExactly(List.of("abc"), List.of("😀😀😀"));
+    }
+
+    @Test
+    void numbersAreRoundedHalfAwayFromZero() {
+        session.execute("CREATE TABLE t (id INT, i INT, price DECIMAL(5, 2), PRIMARY KEY (id))");
+        session.execute("INSERT INTO t VALUES (1, 2.7, 1.005), (2, -2.5, 2.999), (3, 2.4, -1.005)");
+
+        assertThat(rows("SELECT i, price FROM t")).containsExactly(
+                List.of(3, new BigDecimal("1.01")),
+                List.of(-3, new BigDecimal("3.00")),
+                List.of(2, new BigDecimal("-1.01")));
+        assertThat(rows("SELECT CAST(2.5 AS INT), CAST(-2.7 AS INT)")).containsExactly(List.of(3, -3));
+    }
+
+    @Test
     void explainShowsPlanLineByLine() {
         session.execute("CREATE TABLE t (id INT, v INT, PRIMARY KEY (id))");
 

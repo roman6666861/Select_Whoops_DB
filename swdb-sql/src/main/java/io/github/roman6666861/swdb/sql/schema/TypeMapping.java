@@ -71,9 +71,10 @@ public final class TypeMapping {
             case DECIMAL -> column.scale() == ColumnDef.UNSPECIFIED
                     ? factory.createSqlType(SqlTypeName.DECIMAL, column.precision())
                     : factory.createSqlType(SqlTypeName.DECIMAL, column.precision(), column.scale());
-            case VARCHAR -> column.precision() == ColumnDef.UNSPECIFIED
-                    ? factory.createSqlType(SqlTypeName.VARCHAR)
-                    : factory.createSqlType(SqlTypeName.VARCHAR, column.precision());
+            // Длину VARCHAR(n) Calcite не сообщаем: перед записью он приводит значение к типу колонки,
+            // а CAST к VARCHAR(n) молча обрезает строку. PostgreSQL в этом случае выдаёт ошибку,
+            // поэтому длину проверяет RowCodec при записи.
+            case VARCHAR -> factory.createSqlType(SqlTypeName.VARCHAR);
             case DATE -> factory.createSqlType(SqlTypeName.DATE);
             case TIMESTAMP -> factory.createSqlType(SqlTypeName.TIMESTAMP, column.precision());
         };

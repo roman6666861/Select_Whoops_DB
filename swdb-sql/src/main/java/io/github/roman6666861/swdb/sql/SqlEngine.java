@@ -58,6 +58,7 @@ public final class SqlEngine {
         p.setProperty(CalciteConnectionProperty.QUOTING.camelName(), Quoting.DOUBLE_QUOTE.name());
         p.setProperty(CalciteConnectionProperty.CASE_SENSITIVE.camelName(), "true");
         p.setProperty(CalciteConnectionProperty.FUN.camelName(), "standard,postgresql");
+        p.setProperty(CalciteConnectionProperty.TYPE_SYSTEM.camelName(), SwdbTypeSystem.class.getName() + "#INSTANCE");
         return p;
     }
 }
