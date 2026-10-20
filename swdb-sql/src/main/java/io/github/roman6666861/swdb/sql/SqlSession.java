@@ -209,7 +209,13 @@ public final class SqlSession implements AutoCloseable {
         if (message.toLowerCase(Locale.ROOT).contains("by zero")) {
             return new SwdbException(SqlStates.DIVISION_BY_ZERO, "division by zero", e);
         }
-        return new SwdbException(SqlStates.NUMERIC_VALUE_OUT_OF_RANGE, message, e);
+        // Math.addExact и другие проверяемые операции Java пишут «integer overflow» / «long overflow».
+        String postgresMessage = switch (message) {
+            case "integer overflow" -> "integer out of range";
+            case "long overflow" -> "bigint out of range";
+            default -> message;
+        };
+        return new SwdbException(SqlStates.NUMERIC_VALUE_OUT_OF_RANGE, postgresMessage, e);
     }
 
     /** У валидатора Calcite нет кодов ошибок, поэтому самые частые различаем по тексту. */

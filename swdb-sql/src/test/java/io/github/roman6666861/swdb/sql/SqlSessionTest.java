@@ -384,6 +384,27 @@ class SqlSessionTest {
     }
 
     @Test
+    void integerOverflowIsAnError() {
+        session.execute("CREATE TABLE t (id INT, i INT, b BIGINT, PRIMARY KEY (id))");
+        session.execute("INSERT INTO t VALUES (1, 2147483647, 9223372036854775807)");
+
+        for (String sql : List.of("SELECT i + 1 FROM t", "SELECT i * 2 FROM t", "SELECT -i - 2 FROM t",
+                "SELECT 2147483647 + 1", "UPDATE t SET i = i + 1")) {
+            assertThatThrownBy(() -> session.execute(sql))
+                    .isInstanceOfSatisfying(SwdbException.class, e -> {
+                        assertThat(e.sqlState()).isEqualTo(SqlStates.NUMERIC_VALUE_OUT_OF_RANGE);
+                        assertThat(e.getMessage()).isEqualTo("integer out of range");
+                    });
+        }
+        assertThatThrownBy(() -> session.execute("SELECT b + 1 FROM t"))
+                .isInstanceOfSatisfying(SwdbException.class, e -> assertThat(e.getMessage()).isEqualTo("bigint out of range"));
+
+        // В пределах типа — как раньше; результат не помещается в INT, но помещается в BIGINT.
+        assertThat(rows("SELECT i - 1, CAST(i AS BIGINT) + 1 FROM t")).containsExactly(List.of(2147483646, 2147483648L));
+        assertThat(rows("SELECT i FROM t")).containsExactly(List.of(2147483647));
+    }
+
+    @Test
     void explainShowsPlanLineByLine() {
         session.execute("CREATE TABLE t (id INT, v INT, PRIMARY KEY (id))");
 
