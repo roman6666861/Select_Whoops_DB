@@ -227,6 +227,10 @@ public final class SqlSession implements AutoCloseable {
         if (message.matches("Column '.*' not found.*")) {
             return SqlStates.UNDEFINED_COLUMN;
         }
+        // NULL в VALUES или пропущенная колонка без DEFAULT; в PostgreSQL это нарушение NOT NULL.
+        if (message.matches("Column '.*' has no default value and does not allow NULLs")) {
+            return SqlStates.NOT_NULL_VIOLATION;
+        }
         return SqlStates.SYNTAX_ERROR_OR_ACCESS_RULE_VIOLATION;
     }
 }

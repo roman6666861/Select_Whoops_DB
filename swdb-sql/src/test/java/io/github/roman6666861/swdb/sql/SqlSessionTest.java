@@ -256,6 +256,11 @@ class SqlSessionTest {
         session.execute("INSERT INTO t VALUES (1, 'a')");
 
         assertSqlState(() -> session.execute("INSERT INTO t VALUES (1, 'b')"), SqlStates.UNIQUE_VIOLATION);
+        // NOT NULL проверяет уже валидатор Calcite: NULL в VALUES и пропущенная колонка.
+        assertSqlState(() -> session.execute("INSERT INTO t VALUES (2, NULL)"), SqlStates.NOT_NULL_VIOLATION);
+        assertSqlState(() -> session.execute("INSERT INTO t VALUES (NULL, 'b')"), SqlStates.NOT_NULL_VIOLATION);
+        assertSqlState(() -> session.execute("INSERT INTO t (id) VALUES (2)"), SqlStates.NOT_NULL_VIOLATION);
+        assertSqlState(() -> session.execute("UPDATE t SET name = NULL"), SqlStates.NOT_NULL_VIOLATION);
         assertSqlState(() -> session.execute("CREATE TABLE t (id INT, PRIMARY KEY (id))"), SqlStates.DUPLICATE_TABLE);
         assertSqlState(() -> session.execute("SELECT nope FROM t"), SqlStates.UNDEFINED_COLUMN);
         assertSqlState(() -> session.execute("CREATE TABLE nokey (id INT)"), SqlStates.FEATURE_NOT_SUPPORTED);
