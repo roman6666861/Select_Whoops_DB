@@ -414,8 +414,24 @@ class SqlSessionTest {
         assertThat(rows("SELECT SUM(i) OVER (ORDER BY id) FROM t")).containsExactly(List.of(2147483647L), List.of(2147483649L));
         StatementResult result = session.execute("SELECT SUM(i) FROM t");
         assertThat(((StatementResult.Rows) result).columns().getFirst().jdbcType()).isEqualTo(java.sql.Types.BIGINT);
-        // AVG делит сумму в типе аргумента: вместо мусора — ошибка.
-        assertSqlState(() -> session.execute("SELECT AVG(i) FROM t"), SqlStates.NUMERIC_VALUE_OUT_OF_RANGE);
+        assertThat(rows("SELECT AVG(i) FROM t")).containsExactly(List.of(new BigDecimal("1073741824.5000000000000000")));
+    }
+
+    @Test
+    void averageIsNumericWithFraction() {
+        session.execute("CREATE TABLE t (id INT, i INT, p DECIMAL(5, 2), d DOUBLE, g INT, PRIMARY KEY (id))");
+        session.execute("INSERT INTO t VALUES (1, 1, 1.25, 1.0, 1), (2, 2, 2.50, 2.0, 1), (3, 4, 3.00, 4.0, 2)");
+
+        // Как в PostgreSQL: среднее целых и DECIMAL — numeric с 16 знаками после запятой.
+        assertThat(rows("SELECT AVG(i), AVG(p) FROM t WHERE id < 3"))
+                .containsExactly(List.of(new BigDecimal("1.5000000000000000"), new BigDecimal("1.8750000000000000")));
+        assertThat(rows("SELECT g, AVG(i) FROM t GROUP BY g ORDER BY g")).containsExactly(
+                List.of(1, new BigDecimal("1.5000000000000000")), List.of(2, new BigDecimal("4.0000000000000000")));
+        assertThat(rows("SELECT AVG(i) OVER (ORDER BY id) FROM t WHERE id < 3"))
+                .containsExactly(List.of(new BigDecimal("1.0000000000000000")), List.of(new BigDecimal("1.5000000000000000")));
+        // DOUBLE остаётся DOUBLE.
+        assertThat(rows("SELECT AVG(d) FROM t WHERE id < 3")).containsExactly(List.of(1.5));
+        assertThat(rows("SELECT AVG(i) FROM t WHERE id > 5")).containsExactly(List.of());
     }
 
     @Test

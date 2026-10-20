@@ -28,6 +28,41 @@ public final class SwdbTypeSystem extends RelDataTypeSystemImpl {
         return RoundingMode.HALF_UP;
     }
 
+    /** Сколько знаков после запятой у среднего, как в PostgreSQL: {@code avg(1, 2) = 1.5000000000000000}. */
+    private static final int AVG_SCALE = 16;
+
+    /**
+     * Наибольшая точность DECIMAL. У Calcite по умолчанию 19, тогда у среднего с 16 знаками
+     * после запятой на целую часть осталось бы 3 цифры. 38 — как в SQL Server, Spark и Hive;
+     * в PostgreSQL {@code numeric} ещё шире.
+     */
+    @Override
+    public int getMaxPrecision(SqlTypeName typeName) {
+        return typeName == SqlTypeName.DECIMAL ? 38 : super.getMaxPrecision(typeName);
+    }
+
+    /**
+     * Тип результата AVG. По умолчанию в Calcite он равен типу аргумента: среднее 1 и 2 — это 1.
+     * В PostgreSQL среднее целых и DECIMAL — {@code numeric} с дробной частью: 1.5000000000000000.
+     * <p>
+     * Calcite считает AVG как SUM / COUNT, а DECIMAL делит с точностью 16 значащих цифр
+     * ({@code MathContext.DECIMAL64} в {@code SqlFunctions.divide}). Поэтому у бесконечных дробей
+     * последние знаки — нули: среднее 1, 2, 2 — 1.6666666666666670, а в PostgreSQL 1.6666666666666667.
+     */
+    @Override
+    public RelDataType deriveAvgAggType(RelDataTypeFactory typeFactory, RelDataType argumentType) {
+        int scale = switch (argumentType.getSqlTypeName()) {
+            case TINYINT, SMALLINT, INTEGER, BIGINT -> AVG_SCALE;
+            case DECIMAL -> Math.max(AVG_SCALE, argumentType.getScale());
+            default -> -1;
+        };
+        if (scale < 0) {
+            return super.deriveAvgAggType(typeFactory, argumentType);
+        }
+        RelDataType avgType = typeFactory.createSqlType(SqlTypeName.DECIMAL, getMaxPrecision(SqlTypeName.DECIMAL), scale);
+        return typeFactory.createTypeWithNullability(avgType, argumentType.isNullable());
+    }
+
     /**
      * Тип результата SUM. По умолчанию в Calcite он равен типу аргумента, и сумма INT
      * молча переполняется уже на двух больших значениях. В PostgreSQL {@code sum(int)} — {@code bigint}.
