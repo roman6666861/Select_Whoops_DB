@@ -5,6 +5,7 @@ import io.github.roman6666861.swdb.common.SqlStates;
 import io.github.roman6666861.swdb.common.SwdbException;
 import io.github.roman6666861.swdb.storage.KvIterator;
 import io.github.roman6666861.swdb.storage.KvStore;
+import io.github.roman6666861.swdb.storage.KvTransaction;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -35,7 +36,7 @@ public final class Catalog {
         try (KvIterator it = store.scan(Keys.tableMetaPrefix())) {
             while (it.next()) {
                 TableDef table = fromJson(it.value());
-                tables.put(table.name(), new TableStore(store, table));
+                tables.put(table.name(), new TableStore(table));
                 nextTableId = Math.max(nextTableId, table.id() + 1);
             }
         }
@@ -47,6 +48,11 @@ public final class Catalog {
 
     public List<TableStore> tables() {
         return List.copyOf(tables.values());
+    }
+
+    /** Транзакция для чтения и изменения строк таблиц. DDL выполняется вне транзакций. */
+    public KvTransaction begin() {
+        return store.begin();
     }
 
     /**
@@ -70,7 +76,7 @@ public final class Catalog {
         table = new TableDef(table.id(), name, withNotNullKey, table.primaryKey());
 
         store.put(Keys.tableMeta(table.id()), toJson(table));
-        tables.put(name, new TableStore(store, table));
+        tables.put(name, new TableStore(table));
         nextTableId++;
         return true;
     }

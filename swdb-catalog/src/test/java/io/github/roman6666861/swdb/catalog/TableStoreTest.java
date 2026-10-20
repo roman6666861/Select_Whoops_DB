@@ -3,12 +3,14 @@ package io.github.roman6666861.swdb.catalog;
 import io.github.roman6666861.swdb.common.SqlStates;
 import io.github.roman6666861.swdb.common.SwdbException;
 import io.github.roman6666861.swdb.storage.KvStore;
+import io.github.roman6666861.swdb.storage.KvTransaction;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -16,7 +18,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * Чтение по первичному ключу (точечное и по диапазону) и замена строк.
+ * Чтение по первичному ключу (точечное и по диапазону), замена строк и работа в транзакциях.
+ * Если не сказано иное, всё происходит в одной транзакции теста {@link #tx}.
  */
 class TableStoreTest {
 
@@ -25,37 +28,84 @@ class TableStoreTest {
 
     private KvStore store;
     private Catalog catalog;
+    private KvTransaction tx;
 
     @BeforeEach
     void open() {
         store = KvStore.open(dir);
         catalog = new Catalog(store);
+        tx = catalog.begin();
     }
 
     @AfterEach
     void close() {
+        tx.close();
         store.close();
+    }
+
+    @Test
+    void changesAreVisibleToOtherTransactionsAfterCommit() {
+        TableStore t = intTable(1);
+        try (KvTransaction other = catalog.begin()) {
+            assertThat(t.get(other, 1)).as("not committed yet").isEmpty();
+        }
+
+        tx.commit();
+
+        try (KvTransaction other = catalog.begin()) {
+            assertThat(t.get(other, 1)).isPresent();
+        }
+    }
+
+    @Test
+    void rollbackUndoesAllChangesOfTransaction() {
+        TableStore t = intTable(1, 2);
+        tx.commit();
+        try (KvTransaction change = catalog.begin()) {
+            t.insert(change, new Object[]{3, "v3"});
+            t.delete(change, new Object[]{1, "v1"});
+            t.update(change, List.of(change(2, "v2", 2, "x")));
+            change.rollback();
+        }
+
+        try (KvTransaction read = catalog.begin()) {
+            assertThat(rows(t.scan(read))).containsExactly(List.of(1, "v1"), List.of(2, "v2"));
+        }
+    }
+
+    @Test
+    void sameNewKeyInTwoTransactionsWaitsForLock() {
+        TableStore t = intTable();
+        tx.commit();
+        try (KvTransaction first = catalog.begin(); KvTransaction second = store.begin(Duration.ofMillis(100))) {
+            t.insert(first, new Object[]{5, "first"});
+
+            // Ключа ещё нет в базе, но проверка уникальности его заблокировала.
+            assertThatThrownBy(() -> t.insert(second, new Object[]{5, "second"}))
+                    .isInstanceOfSatisfying(SwdbException.class,
+                            e -> assertThat(e.sqlState()).isEqualTo(SqlStates.LOCK_NOT_AVAILABLE));
+        }
     }
 
     @Test
     void getByPrimaryKey() {
         TableStore t = intTable(1, 2, 3);
 
-        assertThat(t.get(2)).hasValueSatisfying(row -> assertThat(row).containsExactly(2, "v2"));
-        assertThat(t.get(2L)).isPresent(); // число другого типа приводится к INTEGER
-        assertThat(t.get(4)).isEmpty();
+        assertThat(t.get(tx, 2)).hasValueSatisfying(row -> assertThat(row).containsExactly(2, "v2"));
+        assertThat(t.get(tx, 2L)).isPresent(); // число другого типа приводится к INTEGER
+        assertThat(t.get(tx, 4)).isEmpty();
     }
 
     @Test
     void scanRangeWithInclusiveAndExclusiveBounds() {
         TableStore t = intTable(-5, 1, 2, 3, 4, 10);
 
-        assertThat(ids(t.scan(KeyBound.inclusive(2), KeyBound.inclusive(4)))).containsExactly(2, 3, 4);
-        assertThat(ids(t.scan(KeyBound.exclusive(2), KeyBound.exclusive(4)))).containsExactly(3);
-        assertThat(ids(t.scan(KeyBound.inclusive(3), null))).containsExactly(3, 4, 10);
-        assertThat(ids(t.scan(null, KeyBound.exclusive(1)))).containsExactly(-5);
-        assertThat(ids(t.scan(KeyBound.inclusive(5), KeyBound.inclusive(9)))).isEmpty();
-        assertThat(ids(t.scan(KeyBound.inclusive(4), KeyBound.inclusive(2)))).isEmpty();
+        assertThat(ids(t.scan(tx, KeyBound.inclusive(2), KeyBound.inclusive(4)))).containsExactly(2, 3, 4);
+        assertThat(ids(t.scan(tx, KeyBound.exclusive(2), KeyBound.exclusive(4)))).containsExactly(3);
+        assertThat(ids(t.scan(tx, KeyBound.inclusive(3), null))).containsExactly(3, 4, 10);
+        assertThat(ids(t.scan(tx, null, KeyBound.exclusive(1)))).containsExactly(-5);
+        assertThat(ids(t.scan(tx, KeyBound.inclusive(5), KeyBound.inclusive(9)))).isEmpty();
+        assertThat(ids(t.scan(tx, KeyBound.inclusive(4), KeyBound.inclusive(2)))).isEmpty();
     }
 
     @Test
@@ -63,10 +113,10 @@ class TableStoreTest {
         TableStore first = intTable(1, 2);
         catalog.createTable("other", List.of(new ColumnDef("id", ColumnType.INTEGER, -1, -1, false)),
                 List.of("id"), false);
-        catalog.table("other").orElseThrow().insert(new Object[]{1});
+        catalog.table("other").orElseThrow().insert(tx, new Object[]{1});
 
-        assertThat(ids(first.scan(KeyBound.inclusive(2), null))).containsExactly(2);
-        assertThat(ids(first.scan(null, null))).containsExactly(1, 2);
+        assertThat(ids(first.scan(tx, KeyBound.inclusive(2), null))).containsExactly(2);
+        assertThat(ids(first.scan(tx, null, null))).containsExactly(1, 2);
     }
 
     @Test
@@ -75,12 +125,12 @@ class TableStoreTest {
                 List.of("w"), false);
         TableStore t = catalog.table("words").orElseThrow();
         for (String w : List.of("a", "ab", "abc", "b", "ba")) {
-            t.insert(new Object[]{w});
+            t.insert(tx, new Object[]{w});
         }
 
         // Строки сравниваются целиком: "ab" < "abc" < "b", но "abc" не начинается с ключа "ab".
-        assertThat(firsts(t.scan(KeyBound.inclusive("ab"), KeyBound.inclusive("b")))).containsExactly("ab", "abc", "b");
-        assertThat(firsts(t.scan(KeyBound.exclusive("ab"), KeyBound.exclusive("b")))).containsExactly("abc");
+        assertThat(firsts(t.scan(tx, KeyBound.inclusive("ab"), KeyBound.inclusive("b")))).containsExactly("ab", "abc", "b");
+        assertThat(firsts(t.scan(tx, KeyBound.exclusive("ab"), KeyBound.exclusive("b")))).containsExactly("abc");
     }
 
     @Test
@@ -92,40 +142,38 @@ class TableStoreTest {
         TableStore t = catalog.table("events").orElseThrow();
         for (int day = 1; day <= 3; day++) {
             for (int seq = 1; seq <= 3; seq++) {
-                t.insert(new Object[]{day, seq});
+                t.insert(tx, new Object[]{day, seq});
             }
         }
 
         // day = 2: граница-префикс включает все seq этого дня.
-        assertThat(rows(t.scan(KeyBound.inclusive(2), KeyBound.inclusive(2))))
+        assertThat(rows(t.scan(tx, KeyBound.inclusive(2), KeyBound.inclusive(2))))
                 .containsExactly(List.of(2, 1), List.of(2, 2), List.of(2, 3));
         // day > 2, хотя в границе нет seq.
-        assertThat(rows(t.scan(KeyBound.exclusive(2), null))).hasSize(3).allMatch(row -> row.getFirst().equals(3));
+        assertThat(rows(t.scan(tx, KeyBound.exclusive(2), null))).hasSize(3).allMatch(row -> row.getFirst().equals(3));
         // day = 2 AND seq >= 2.
-        assertThat(rows(t.scan(KeyBound.inclusive(2, 2), KeyBound.inclusive(2))))
+        assertThat(rows(t.scan(tx, KeyBound.inclusive(2, 2), KeyBound.inclusive(2))))
                 .containsExactly(List.of(2, 2), List.of(2, 3));
-        assertThat(t.get(3, 1)).isPresent();
+        assertThat(t.get(tx, 3, 1)).isPresent();
     }
 
     @Test
     void updateKeepingKeyReplacesRow() {
         TableStore t = intTable(1, 2);
 
-        assertThat(t.update(List.of(change(1, "v1", 1, "x")))).isEqualTo(1);
+        assertThat(t.update(tx, List.of(change(1, "v1", 1, "x")))).isEqualTo(1);
 
-        assertThat(rows(t.scan())).containsExactly(List.of(1, "x"), List.of(2, "v2"));
-        assertThat(t.rowCount()).isEqualTo(2);
+        assertThat(rows(t.scan(tx))).containsExactly(List.of(1, "x"), List.of(2, "v2"));
     }
 
     @Test
     void updateOfPrimaryKeyMovesRow() {
         TableStore t = intTable(1, 2);
 
-        t.update(List.of(change(1, "v1", 5, "v1")));
+        t.update(tx, List.of(change(1, "v1", 5, "v1")));
 
-        assertThat(rows(t.scan())).containsExactly(List.of(2, "v2"), List.of(5, "v1"));
-        assertThat(t.get(1)).isEmpty();
-        assertThat(t.rowCount()).isEqualTo(2);
+        assertThat(rows(t.scan(tx))).containsExactly(List.of(2, "v2"), List.of(5, "v1"));
+        assertThat(t.get(tx, 1)).isEmpty();
     }
 
     @Test
@@ -133,9 +181,9 @@ class TableStoreTest {
         TableStore t = intTable(1, 2, 3);
 
         // Как UPDATE t SET id = id + 1: ключ 2 занят, пока его не освободит вторая строка.
-        t.update(List.of(change(1, "v1", 2, "v1"), change(2, "v2", 3, "v2"), change(3, "v3", 4, "v3")));
+        t.update(tx, List.of(change(1, "v1", 2, "v1"), change(2, "v2", 3, "v2"), change(3, "v3", 4, "v3")));
 
-        assertThat(rows(t.scan())).containsExactly(List.of(2, "v1"), List.of(3, "v2"), List.of(4, "v3"));
+        assertThat(rows(t.scan(tx))).containsExactly(List.of(2, "v1"), List.of(3, "v2"), List.of(4, "v3"));
     }
 
     @Test
@@ -143,36 +191,36 @@ class TableStoreTest {
         TableStore t = intTable(1, 2, 3);
 
         // Ключ 3 занят строкой, которая не меняется.
-        assertThatThrownBy(() -> t.update(List.of(change(1, "v1", 0, "v1"), change(2, "v2", 3, "v2"))))
+        assertThatThrownBy(() -> t.update(tx, List.of(change(1, "v1", 0, "v1"), change(2, "v2", 3, "v2"))))
                 .isInstanceOfSatisfying(SwdbException.class,
                         e -> assertThat(e.sqlState()).isEqualTo(SqlStates.UNIQUE_VIOLATION));
         // Две строки на один ключ.
-        assertThatThrownBy(() -> t.update(List.of(change(1, "v1", 7, "v1"), change(2, "v2", 7, "v2"))))
+        assertThatThrownBy(() -> t.update(tx, List.of(change(1, "v1", 7, "v1"), change(2, "v2", 7, "v2"))))
                 .isInstanceOfSatisfying(SwdbException.class,
                         e -> assertThat(e.sqlState()).isEqualTo(SqlStates.UNIQUE_VIOLATION));
 
-        assertThat(rows(t.scan())).containsExactly(List.of(1, "v1"), List.of(2, "v2"), List.of(3, "v3"));
+        assertThat(rows(t.scan(tx))).containsExactly(List.of(1, "v1"), List.of(2, "v2"), List.of(3, "v3"));
     }
 
     @Test
     void invalidValueRejectsWholeUpdate() {
         TableStore t = intTable(1, 2);
 
-        assertThatThrownBy(() -> t.update(List.of(change(1, "v1", 1, "ok"), change(2, "v2", 2, "far too long"))))
+        assertThatThrownBy(() -> t.update(tx, List.of(change(1, "v1", 1, "ok"), change(2, "v2", 2, "far too long"))))
                 .isInstanceOfSatisfying(SwdbException.class,
                         e -> assertThat(e.sqlState()).isEqualTo(SqlStates.STRING_DATA_RIGHT_TRUNCATION));
 
-        assertThat(rows(t.scan())).containsExactly(List.of(1, "v1"), List.of(2, "v2"));
+        assertThat(rows(t.scan(tx))).containsExactly(List.of(1, "v1"), List.of(2, "v2"));
     }
 
     @Test
     void rowDeletedSinceReadIsSkipped() {
         TableStore t = intTable(1, 2);
-        t.delete(new Object[]{1, "v1"});
+        t.delete(tx, new Object[]{1, "v1"});
 
-        assertThat(t.update(List.of(change(1, "v1", 1, "x"), change(2, "v2", 2, "y")))).isEqualTo(1);
+        assertThat(t.update(tx, List.of(change(1, "v1", 1, "x"), change(2, "v2", 2, "y")))).isEqualTo(1);
 
-        assertThat(rows(t.scan())).containsExactly(List.of(2, "y"));
+        assertThat(rows(t.scan(tx))).containsExactly(List.of(2, "y"));
     }
 
     private static TableStore.Change change(int oldId, String oldV, int newId, String newV) {
@@ -187,7 +235,7 @@ class TableStoreTest {
                 List.of("id"), false);
         TableStore t = catalog.table("t").orElseThrow();
         for (int id : ids) {
-            t.insert(new Object[]{id, "v" + id});
+            t.insert(tx, new Object[]{id, "v" + id});
         }
         return t;
     }

@@ -17,18 +17,20 @@ public final class SwdbSchema extends AbstractSchema {
     public static final String NAME = "public";
 
     private final Catalog catalog;
+    private final SessionTransaction transaction;
 
-    public SwdbSchema(Catalog catalog) {
+    public SwdbSchema(Catalog catalog, SessionTransaction transaction) {
         this.catalog = catalog;
+        this.transaction = transaction;
     }
 
     @Override
     protected Map<String, Table> getTableMap() {
         return catalog.tables().stream()
-                .collect(Collectors.toMap(t -> t.table().name(), SwdbSchema::toCalciteTable));
+                .collect(Collectors.toMap(t -> t.table().name(), this::toCalciteTable));
     }
 
-    private static Table toCalciteTable(TableStore store) {
-        return new SwdbTable(store);
+    private Table toCalciteTable(TableStore store) {
+        return new SwdbTable(store, transaction);
     }
 }

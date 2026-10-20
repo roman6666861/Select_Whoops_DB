@@ -199,6 +199,24 @@ class SqlSessionTest {
     }
 
     @Test
+    void failedStatementLeavesNoChanges() {
+        session.execute("CREATE TABLE t (id INT, v INT NOT NULL, PRIMARY KEY (id))");
+        session.execute("INSERT INTO t VALUES (1, 10), (2, 20), (3, 30)");
+
+        // Каждый оператор — своя транзакция: строки до ошибки уже изменены, но откатываются вместе с ней.
+        assertSqlState(() -> session.execute("INSERT INTO t VALUES (4, 40), (5, 50), (1, 99)"), SqlStates.UNIQUE_VIOLATION);
+        assertSqlState(() -> session.execute(
+                "INSERT INTO t SELECT id + 10, CASE WHEN id < 3 THEN v END FROM t"), SqlStates.NOT_NULL_VIOLATION);
+        // Строки удаляются в порядке ключа: 1 и 2 уже удалены, когда на 3 случается деление на ноль.
+        assertSqlState(() -> session.execute("DELETE FROM t WHERE 10 / (3 - id) > 0"), SqlStates.DIVISION_BY_ZERO);
+
+        assertThat(rows("SELECT id, v FROM t")).containsExactly(List.of(1, 10), List.of(2, 20), List.of(3, 30));
+        // Число строк считается по самим изменениям, а не по размеру таблицы.
+        assertThat(session.execute("INSERT INTO t VALUES (4, 40), (5, 50)")).isEqualTo(new StatementResult.Update("INSERT", 2));
+        assertThat(session.execute("DELETE FROM t WHERE id > 2")).isEqualTo(new StatementResult.Update("DELETE", 3));
+    }
+
+    @Test
     void primaryKeyInColumnDeclaration() {
         session.execute("CREATE TABLE t (id INT PRIMARY KEY, price DECIMAL(10, 2), name VARCHAR(10))");
         session.execute("INSERT INTO t VALUES (2, 1.5, 'b'), (1, 2.5, 'a')");

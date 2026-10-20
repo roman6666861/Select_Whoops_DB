@@ -3,6 +3,7 @@ package io.github.roman6666861.swdb.sql;
 import io.github.roman6666861.swdb.catalog.Catalog;
 import io.github.roman6666861.swdb.common.SqlStates;
 import io.github.roman6666861.swdb.common.SwdbException;
+import io.github.roman6666861.swdb.sql.schema.SessionTransaction;
 import io.github.roman6666861.swdb.sql.schema.SwdbSchema;
 import org.apache.calcite.avatica.util.Casing;
 import org.apache.calcite.avatica.util.Quoting;
@@ -40,11 +41,12 @@ public final class SqlEngine {
     public SqlSession openSession() {
         try {
             CalciteConnection connection = driver.connect(URL, properties).unwrap(CalciteConnection.class);
-            SchemaPlus schema = connection.getRootSchema().add(SwdbSchema.NAME, new SwdbSchema(catalog));
+            SessionTransaction transaction = new SessionTransaction();
+            SchemaPlus schema = connection.getRootSchema().add(SwdbSchema.NAME, new SwdbSchema(catalog, transaction));
             // Без кэша Calcite спрашивает список таблиц у схемы при каждом запросе и видит свежий DDL.
             schema.setCacheEnabled(false);
             connection.setSchema(SwdbSchema.NAME);
-            return new SqlSession(connection, parserConfig, new DdlExecutor(catalog));
+            return new SqlSession(connection, parserConfig, new DdlExecutor(catalog), catalog, transaction);
         } catch (SQLException e) {
             throw new SwdbException(SqlStates.INTERNAL_ERROR, "cannot open SQL session: " + e.getMessage(), e);
         }

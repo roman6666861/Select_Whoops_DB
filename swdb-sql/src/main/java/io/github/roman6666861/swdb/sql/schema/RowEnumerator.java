@@ -8,19 +8,21 @@ import java.util.function.Function;
 
 /**
  * Потоковое чтение таблицы для Calcite: строки читаются из RocksDB по одной,
- * без загрузки всей таблицы в память.
+ * без загрузки всей таблицы в память, через текущую транзакцию сессии.
  *
  * @param <T> во что Calcite ждёт превратить строку {@code Object[]} (см. {@code rowFormat})
  */
 final class RowEnumerator<T> implements Enumerator<T> {
 
     private final TableStore store;
+    private final SessionTransaction transaction;
     private final KeyRange range;
     private final Function<Object[], T> rowFormat;
     private RowCursor cursor;
 
-    RowEnumerator(TableStore store, KeyRange range, Function<Object[], T> rowFormat) {
+    RowEnumerator(TableStore store, SessionTransaction transaction, KeyRange range, Function<Object[], T> rowFormat) {
         this.store = store;
+        this.transaction = transaction;
         this.range = range;
         this.rowFormat = rowFormat;
     }
@@ -33,7 +35,7 @@ final class RowEnumerator<T> implements Enumerator<T> {
     @Override
     public boolean moveNext() {
         if (cursor == null) {
-            cursor = store.scan(range.lower(), range.upper());
+            cursor = store.scan(transaction.current(), range.lower(), range.upper());
         }
         return cursor.next();
     }

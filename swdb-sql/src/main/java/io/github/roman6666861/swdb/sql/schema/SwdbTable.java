@@ -2,6 +2,7 @@ package io.github.roman6666861.swdb.sql.schema;
 
 import io.github.roman6666861.swdb.catalog.ColumnDef;
 import io.github.roman6666861.swdb.catalog.TableStore;
+import io.github.roman6666861.swdb.storage.KvTransaction;
 import org.apache.calcite.DataContext;
 import org.apache.calcite.adapter.java.AbstractQueryableTable;
 import org.apache.calcite.linq4j.AbstractEnumerable;
@@ -39,14 +40,21 @@ import java.util.List;
 final class SwdbTable extends AbstractQueryableTable implements ModifiableTable, FilterableTable {
 
     private final TableStore store;
+    private final SessionTransaction transaction;
 
-    SwdbTable(TableStore store) {
+    SwdbTable(TableStore store, SessionTransaction transaction) {
         super(Object[].class);
         this.store = store;
+        this.transaction = transaction;
     }
 
     TableStore store() {
         return store;
+    }
+
+    /** Транзакция оператора, который сейчас выполняется в сессии. */
+    KvTransaction transaction() {
+        return transaction.current();
     }
 
     @Override
@@ -68,7 +76,7 @@ final class SwdbTable extends AbstractQueryableTable implements ModifiableTable,
         return new AbstractTableQueryable<>(queryProvider, schema, this, tableName) {
             @Override
             public Enumerator<T> enumerator() {
-                return new RowEnumerator<>(store, KeyRange.ALL, row -> (T) row);
+                return new RowEnumerator<>(store, transaction, KeyRange.ALL, row -> (T) row);
             }
         };
     }
@@ -83,14 +91,14 @@ final class SwdbTable extends AbstractQueryableTable implements ModifiableTable,
         return new AbstractEnumerable<>() {
             @Override
             public Enumerator<Object[]> enumerator() {
-                return new RowEnumerator<>(store, range, row -> row);
+                return new RowEnumerator<>(store, transaction, range, row -> row);
             }
         };
     }
 
     @Override
     public Collection<Object> getModifiableCollection() {
-        return new RowCollection(store);
+        return new RowCollection(store, transaction.current());
     }
 
     @Override

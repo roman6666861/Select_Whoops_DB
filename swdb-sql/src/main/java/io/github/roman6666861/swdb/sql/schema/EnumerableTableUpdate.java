@@ -102,7 +102,8 @@ public final class EnumerableTableUpdate extends TableModify implements Enumerab
      */
     public static Enumerable<Long> execute(ModifiableTable table, Enumerable<Object[]> rows,
                                            int[] targetColumns, int[] sourceFields) {
-        TableStore store = ((SwdbTable) table).store();
+        SwdbTable swdbTable = (SwdbTable) table;
+        TableStore store = swdbTable.store();
         int columnCount = store.table().columns().size();
         // Сначала читаем всё, потом пишем: иначе изменённая строка могла бы попасть в чтение повторно.
         List<TableStore.Change> changes = new ArrayList<>();
@@ -117,6 +118,6 @@ public final class EnumerableTableUpdate extends TableModify implements Enumerab
                 changes.add(new TableStore.Change(before, after));
             }
         }
-        return Linq4j.singletonEnumerable(store.update(changes));
+        return Linq4j.singletonEnumerable(store.update(swdbTable.transaction(), changes));
     }
 }

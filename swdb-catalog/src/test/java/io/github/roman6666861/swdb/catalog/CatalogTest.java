@@ -3,6 +3,7 @@ package io.github.roman6666861.swdb.catalog;
 import io.github.roman6666861.swdb.common.SqlStates;
 import io.github.roman6666861.swdb.common.SwdbException;
 import io.github.roman6666861.swdb.storage.KvStore;
+import io.github.roman6666861.swdb.storage.KvTransaction;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -45,15 +46,14 @@ class CatalogTest {
         catalog.createTable("users", USERS, List.of("id"), false);
         TableStore users = catalog.table("users").orElseThrow();
 
-        users.insert(new Object[]{3, "carol", new BigDecimal("30.00")});
-        users.insert(new Object[]{-1, "ann", null});
-        users.insert(new Object[]{2, "bob", new BigDecimal("20.50")});
+        insert(users, new Object[]{3, "carol", new BigDecimal("30.00")});
+        insert(users, new Object[]{-1, "ann", null});
+        insert(users, new Object[]{2, "bob", new BigDecimal("20.50")});
 
         assertThat(rows(users)).containsExactly(
                 new Object[]{-1, "ann", null},
                 new Object[]{2, "bob", new BigDecimal("20.50")},
                 new Object[]{3, "carol", new BigDecimal("30.00")});
-        assertThat(users.rowCount()).isEqualTo(3);
     }
 
     @Test
@@ -61,7 +61,7 @@ class CatalogTest {
         catalog.createTable("users", USERS, List.of("id"), false);
 
         assertThat(catalog.table("users").orElseThrow().table().columns().getFirst().nullable()).isFalse();
-        assertThatThrownBy(() -> catalog.table("users").orElseThrow().insert(new Object[]{null, "x", null}))
+        assertThatThrownBy(() -> insert(catalog.table("users").orElseThrow(), new Object[]{null, "x", null}))
                 .satisfies(e -> assertSqlState(e, SqlStates.NOT_NULL_VIOLATION));
     }
 
@@ -69,9 +69,9 @@ class CatalogTest {
     void duplicatePrimaryKeyIsRejected() {
         catalog.createTable("users", USERS, List.of("id"), false);
         TableStore users = catalog.table("users").orElseThrow();
-        users.insert(new Object[]{1, "ann", null});
+        insert(users, new Object[]{1, "ann", null});
 
-        assertThatThrownBy(() -> users.insert(new Object[]{1, "bob", null}))
+        assertThatThrownBy(() -> insert(users, new Object[]{1, "bob", null}))
                 .satisfies(e -> assertSqlState(e, SqlStates.UNIQUE_VIOLATION));
     }
 
@@ -79,14 +79,14 @@ class CatalogTest {
     void varcharLengthIsEnforced() {
         catalog.createTable("users", USERS, List.of("id"), false);
 
-        assertThatThrownBy(() -> catalog.table("users").orElseThrow().insert(new Object[]{1, "toolong", null}))
+        assertThatThrownBy(() -> insert(catalog.table("users").orElseThrow(), new Object[]{1, "toolong", null}))
                 .satisfies(e -> assertSqlState(e, SqlStates.STRING_DATA_RIGHT_TRUNCATION));
     }
 
     @Test
     void tablesAndRowsSurviveRestart() {
         catalog.createTable("users", USERS, List.of("id"), false);
-        catalog.table("users").orElseThrow().insert(new Object[]{1, "ann", BigDecimal.ONE});
+        insert(catalog.table("users").orElseThrow(), new Object[]{1, "ann", BigDecimal.ONE});
         store.close();
 
         store = KvStore.open(dir);
@@ -100,9 +100,9 @@ class CatalogTest {
     @Test
     void dropRemovesDataAndIdIsNotConfused() {
         catalog.createTable("a", USERS, List.of("id"), false);
-        catalog.table("a").orElseThrow().insert(new Object[]{1, "x", null});
+        insert(catalog.table("a").orElseThrow(), new Object[]{1, "x", null});
         catalog.createTable("b", USERS, List.of("id"), false);
-        catalog.table("b").orElseThrow().insert(new Object[]{2, "y", null});
+        insert(catalog.table("b").orElseThrow(), new Object[]{2, "y", null});
 
         catalog.dropTable("a", false);
 
@@ -128,9 +128,17 @@ class CatalogTest {
                 .satisfies(e -> assertSqlState(e, SqlStates.FEATURE_NOT_SUPPORTED));
     }
 
-    private static List<Object[]> rows(TableStore table) {
+    /** Вставка в отдельной транзакции с COMMIT. */
+    private void insert(TableStore table, Object[] row) {
+        try (KvTransaction tx = catalog.begin()) {
+            table.insert(tx, row);
+            tx.commit();
+        }
+    }
+
+    private List<Object[]> rows(TableStore table) {
         List<Object[]> rows = new ArrayList<>();
-        try (RowCursor cursor = table.scan()) {
+        try (KvTransaction tx = catalog.begin(); RowCursor cursor = table.scan(tx)) {
             while (cursor.next()) {
                 rows.add(cursor.row());
             }
