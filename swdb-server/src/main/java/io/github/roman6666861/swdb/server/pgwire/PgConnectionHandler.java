@@ -84,7 +84,8 @@ public final class PgConnectionHandler extends SimpleChannelInboundHandler<Front
             case FrontendMessage.Query query -> query(ctx, query.sql());
             case FrontendMessage.Sync _ -> {
                 skipUntilSync = false;
-                send(ctx, w -> w.readyForQuery(PgMessageWriter.IDLE));
+                char status = transactionStatus();
+                send(ctx, w -> w.readyForQuery(status));
             }
             case FrontendMessage.Terminate _ -> ctx.close();
             case FrontendMessage.Unsupported unsupported -> {
@@ -129,11 +130,13 @@ public final class PgConnectionHandler extends SimpleChannelInboundHandler<Front
         try {
             result = session.execute(sql);
         } catch (SwdbException e) {
+            char status = transactionStatus();
             send(ctx, w -> w
                     .errorResponse(e.sqlState(), e.getMessage())
-                    .readyForQuery(PgMessageWriter.IDLE));
+                    .readyForQuery(status));
             return;
         }
+        char status = transactionStatus();
         send(ctx, w -> {
             switch (result) {
                 case StatementResult.Rows rows -> {
@@ -146,8 +149,24 @@ public final class PgConnectionHandler extends SimpleChannelInboundHandler<Front
                 case StatementResult.Update update -> w.commandComplete(commandTag(update));
                 case StatementResult.Empty _ -> w.emptyQueryResponse();
             }
-            w.readyForQuery(PgMessageWriter.IDLE);
+            w.readyForQuery(status);
         });
+    }
+
+    /**
+     * Статус транзакции для ReadyForQuery. По нему клиент понимает, нужен ли COMMIT:
+     * pgjdbc с autoCommit = false шлёт COMMIT, только если сервер сообщил, что транзакция идёт,
+     * а psql показывает его в приглашении (=#, =*#, =!#).
+     */
+    private char transactionStatus() {
+        if (session == null) {
+            return PgMessageWriter.IDLE;
+        }
+        return switch (session.transactionStatus()) {
+            case IDLE -> PgMessageWriter.IDLE;
+            case IN_TRANSACTION -> PgMessageWriter.IN_TRANSACTION;
+            case FAILED -> PgMessageWriter.FAILED_TRANSACTION;
+        };
     }
 
     private static String commandTag(StatementResult.Update update) {

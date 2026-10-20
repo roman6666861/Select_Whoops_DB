@@ -12,7 +12,12 @@ import static java.nio.charset.StandardCharsets.UTF_8;
  */
 final class PgMessageWriter {
 
+    /** Статус транзакции в ReadyForQuery: вне транзакции. */
     static final char IDLE = 'I';
+    /** Внутри BEGIN ... COMMIT. */
+    static final char IN_TRANSACTION = 'T';
+    /** В сломанной транзакции: сервер ждёт ROLLBACK. */
+    static final char FAILED_TRANSACTION = 'E';
 
     private final ByteBuf buf;
     private int lengthIndex;
