@@ -47,10 +47,11 @@ class TablesOverPgWireTest {
 
             assertSqlState(() -> s.executeUpdate("INSERT INTO t VALUES (1)"), "23505");
             assertSqlState(() -> s.executeQuery("SELECT id FROM missing"), "42P01");
-            assertSqlState(() -> s.executeUpdate("UPDATE t SET id = 2"), "0A000");
+            assertSqlState(() -> s.executeUpdate("CREATE VIEW v AS SELECT id FROM t"), "0A000");
 
             // После ошибок соединение продолжает работать.
-            assertThat(names(s, "SELECT CAST(id AS VARCHAR) FROM t")).containsExactly("1");
+            assertThat(s.executeUpdate("UPDATE t SET id = 2")).isEqualTo(1);
+            assertThat(names(s, "SELECT CAST(id AS VARCHAR) FROM t")).containsExactly("2");
         }
     }
 

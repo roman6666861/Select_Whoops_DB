@@ -107,10 +107,57 @@ class SqlSessionTest {
     }
 
     @Test
-    void updateIsReportedAsNotSupported() {
+    void updateValues() {
+        session.execute("CREATE TABLE t (id INT, v INT, note VARCHAR(5), d DATE, PRIMARY KEY (id))");
+        session.execute("INSERT INTO t VALUES (1, 10, 'a', DATE '2026-01-01'), (2, 20, 'b', NULL), (3, 30, 'c', NULL)");
+
+        assertThat(session.execute("UPDATE t SET v = v + 1 WHERE id = 2")).isEqualTo(new StatementResult.Update("UPDATE", 1));
+        assertThat(session.execute("UPDATE t SET d = d + INTERVAL '1' DAY, note = UPPER(note) WHERE id < 2"))
+                .isEqualTo(new StatementResult.Update("UPDATE", 1));
+        assertThat(session.execute("UPDATE t SET note = 'x' WHERE v > 25")).isEqualTo(new StatementResult.Update("UPDATE", 1));
+        assertThat(session.execute("UPDATE t SET v = 0 WHERE id = 99")).isEqualTo(new StatementResult.Update("UPDATE", 0));
+
+        assertThat(rows("SELECT * FROM t")).containsExactly(
+                List.of(1, 10, "A", Date.valueOf("2026-01-02")),
+                List.of(2, 21, "b"),
+                List.of(3, 30, "x"));
+        // Без WHERE меняются все строки; NULL в колонке, допускающей NULL.
+        assertThat(session.execute("UPDATE t SET d = NULL")).isEqualTo(new StatementResult.Update("UPDATE", 3));
+        assertThat(rows("SELECT id FROM t WHERE d IS NULL")).hasSize(3);
+    }
+
+    @Test
+    void updatePrimaryKey() {
+        session.execute("CREATE TABLE t (id INT, v INT NOT NULL, PRIMARY KEY (id))");
+        session.execute("INSERT INTO t VALUES (1, 10), (2, 20), (3, 30)");
+
+        // Новый ключ строки 1 — старый ключ строки 2: проверяется итоговое состояние, а не каждая строка.
+        assertThat(session.execute("UPDATE t SET id = id + 1")).isEqualTo(new StatementResult.Update("UPDATE", 3));
+        assertThat(rows("SELECT id, v FROM t")).containsExactly(List.of(2, 10), List.of(3, 20), List.of(4, 30));
+
+        // Ошибка в любой строке отменяет весь UPDATE.
+        assertSqlState(() -> session.execute("UPDATE t SET id = 4 WHERE id = 2"), SqlStates.UNIQUE_VIOLATION);
+        assertSqlState(() -> session.execute("UPDATE t SET id = 9 WHERE id > 2"), SqlStates.UNIQUE_VIOLATION);
+        assertSqlState(() -> session.execute("UPDATE t SET v = NULL WHERE id = 4"), SqlStates.NOT_NULL_VIOLATION);
+        assertThat(rows("SELECT id, v FROM t")).containsExactly(List.of(2, 10), List.of(3, 20), List.of(4, 30));
+    }
+
+    @Test
+    void updateSingleColumnTable() {
+        session.execute("CREATE TABLE tags (name VARCHAR(10), PRIMARY KEY (name))");
+        session.execute("INSERT INTO tags VALUES ('a'), ('b')");
+
+        assertThat(session.execute("UPDATE tags SET name = 'c' WHERE name = 'a'")).isEqualTo(new StatementResult.Update("UPDATE", 1));
+        assertThat(rows("SELECT name FROM tags")).containsExactly(List.of("b"), List.of("c"));
+    }
+
+    @Test
+    void mergeIsReportedAsNotSupported() {
         session.execute("CREATE TABLE t (id INT, v INT, PRIMARY KEY (id))");
 
-        assertSqlState(() -> session.execute("UPDATE t SET v = 1"), SqlStates.FEATURE_NOT_SUPPORTED);
+        assertSqlState(() -> session.execute("""
+                MERGE INTO t USING (VALUES (1, 2)) AS s (id, v) ON t.id = s.id
+                WHEN MATCHED THEN UPDATE SET v = s.v"""), SqlStates.FEATURE_NOT_SUPPORTED);
     }
 
     @Test
@@ -312,6 +359,8 @@ class SqlSessionTest {
         session.execute("INSERT INTO t VALUES (1)");
 
         session.execute("EXPLAIN DELETE FROM t");
+        assertThat(rows("EXPLAIN UPDATE t SET id = 2").getFirst().getFirst()).asString()
+                .startsWith("EnumerableTableUpdate(table=[[public, t]], operation=[UPDATE], updateColumnList=[[id]]");
 
         assertThat(rows("SELECT id FROM t")).containsExactly(List.of(1));
     }

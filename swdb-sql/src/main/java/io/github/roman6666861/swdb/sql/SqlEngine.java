@@ -24,7 +24,7 @@ public final class SqlEngine {
     private static final String URL = "jdbc:calcite:";
 
     private final Catalog catalog;
-    private final Driver driver = new Driver();
+    private final Driver driver = new Driver().withPrepareFactory(SwdbPrepare::new);
     private final Properties properties = postgresLikeProperties();
     private final SqlParser.Config parserConfig = SqlParser.config()
             .withParserFactory(SqlDdlParserImpl.FACTORY)

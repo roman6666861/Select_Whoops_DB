@@ -9,7 +9,6 @@ import org.apache.calcite.sql.SqlCreate;
 import org.apache.calcite.sql.SqlDrop;
 import org.apache.calcite.sql.SqlExplain;
 import org.apache.calcite.sql.SqlMerge;
-import org.apache.calcite.sql.SqlUpdate;
 import org.apache.calcite.sql.SqlSetOption;
 import org.apache.calcite.sql.ddl.SqlCreateTable;
 import org.apache.calcite.sql.ddl.SqlDropTable;
@@ -69,8 +68,7 @@ public final class SqlSession implements AutoCloseable {
             case SqlExplain _ -> explain(text);
             case SqlCreate create -> throw unsupported(create.getOperator().getName());
             case SqlDrop drop -> throw unsupported(drop.getOperator().getName());
-            // Исполнитель Calcite (Enumerable) умеет только INSERT и DELETE.
-            case SqlUpdate _ -> throw unsupported("UPDATE");
+            // Исполнитель Calcite умеет только INSERT и DELETE; UPDATE мы добавили сами (TableModifyRule).
             case SqlMerge _ -> throw unsupported("MERGE");
             default -> executeQuery(text);
         };

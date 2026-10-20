@@ -34,6 +34,7 @@ import java.util.List;
  * в обоих случаях строки перебирает {@link RowEnumerator}.
  * Запись: для INSERT и DELETE Calcite строит план {@code TableModify}, который добавляет строки
  * в {@link #getModifiableCollection()} или удаляет их оттуда, а коллекция пишет в RocksDB.
+ * UPDATE выполняет {@link EnumerableTableUpdate}.
  */
 final class SwdbTable extends AbstractQueryableTable implements ModifiableTable, FilterableTable {
 
@@ -42,6 +43,10 @@ final class SwdbTable extends AbstractQueryableTable implements ModifiableTable,
     SwdbTable(TableStore store) {
         super(Object[].class);
         this.store = store;
+    }
+
+    TableStore store() {
+        return store;
     }
 
     @Override
