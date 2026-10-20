@@ -42,9 +42,9 @@ DROP TABLE IF EXISTS employees;
 - `SELECT` с `WHERE`, `JOIN`, `GROUP BY`, агрегатами, `ORDER BY`, подзапросами, CTE, оконными функциями;
 - `EXPLAIN <запрос>` (как в PostgreSQL) и `EXPLAIN PLAN FOR <запрос>` (как в Calcite) — план без выполнения;
 - типы: `BOOLEAN`, `INT`, `BIGINT`, `DOUBLE`, `DECIMAL(p, s)`, `VARCHAR(n)`/`TEXT`, `DATE`, `TIMESTAMP`;
-- `PRIMARY KEY` (обязателен, можно составной), `NOT NULL`; данные хранятся в RocksDB и переживают перезапуск.
+- `PRIMARY KEY` (обязателен; составной — `PRIMARY KEY (a, b)`, из одной колонки можно и `id INT PRIMARY KEY`), `NOT NULL`; данные хранятся в RocksDB и переживают перезапуск.
 
-Пока не поддерживаются: `MERGE`, `PRIMARY KEY` в объявлении колонки (`id INT PRIMARY KEY`),
+Пока не поддерживаются: `MERGE`,
 `DEFAULT`, `UNIQUE`, вторичные индексы, транзакции, пользователи и пароли.
 
 ## Модули

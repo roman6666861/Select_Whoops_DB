@@ -56,7 +56,7 @@ public final class SqlSession implements AutoCloseable {
     }
 
     public StatementResult execute(String sql) {
-        String text = calciteExplainSyntax(stripTrailingSemicolons(sql));
+        String text = ColumnPrimaryKey.toTableConstraint(calciteExplainSyntax(stripTrailingSemicolons(sql)));
         if (text.isEmpty()) {
             return new StatementResult.Empty();
         }

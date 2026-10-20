@@ -199,6 +199,23 @@ class SqlSessionTest {
     }
 
     @Test
+    void primaryKeyInColumnDeclaration() {
+        session.execute("CREATE TABLE t (id INT PRIMARY KEY, price DECIMAL(10, 2), name VARCHAR(10))");
+        session.execute("INSERT INTO t VALUES (2, 1.5, 'b'), (1, 2.5, 'a')");
+
+        assertThat(rows("SELECT id, name FROM t")).containsExactly(List.of(1, "a"), List.of(2, "b"));
+        assertSqlState(() -> session.execute("INSERT INTO t VALUES (1, 0, 'x')"), SqlStates.UNIQUE_VIOLATION);
+        // Колонка ключа становится NOT NULL, как и при PRIMARY KEY (id).
+        assertSqlState(() -> session.execute("INSERT INTO t SELECT NULL, 0, 'x' FROM (VALUES (1))"),
+                SqlStates.NOT_NULL_VIOLATION);
+
+        assertSqlState(() -> session.execute("CREATE TABLE two (a INT PRIMARY KEY, b INT PRIMARY KEY)"),
+                SqlStates.INVALID_TABLE_DEFINITION);
+        assertSqlState(() -> session.execute("CREATE TABLE both_ways (a INT PRIMARY KEY, b INT, PRIMARY KEY (b))"),
+                SqlStates.INVALID_TABLE_DEFINITION);
+    }
+
+    @Test
     void tableCreatedInOneSessionIsVisibleInAnother() {
         session.execute("CREATE TABLE t (id INT, PRIMARY KEY (id))");
         session.execute("INSERT INTO t VALUES (1)");
