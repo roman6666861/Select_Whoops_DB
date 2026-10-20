@@ -4,7 +4,6 @@ import io.github.roman6666861.swdb.catalog.Catalog;
 import io.github.roman6666861.swdb.common.SqlStates;
 import io.github.roman6666861.swdb.common.SwdbException;
 import io.github.roman6666861.swdb.sql.schema.SessionTransaction;
-import io.github.roman6666861.swdb.storage.KvTransaction;
 import org.apache.calcite.runtime.CalciteContextException;
 import org.apache.calcite.sql.SqlLiteral;
 import org.apache.calcite.sql.SqlNode;
@@ -45,8 +44,7 @@ public final class SqlSession implements AutoCloseable {
     private final Connection connection;
     private final SqlParser.Config parserConfig;
     private final DdlExecutor ddl;
-    private final Catalog catalog;
-    private final SessionTransaction transaction;
+    private final TransactionBlock transactions;
     private final Map<String, String> settings = new HashMap<>();
 
     SqlSession(Connection connection, SqlParser.Config parserConfig, DdlExecutor ddl,
@@ -54,8 +52,7 @@ public final class SqlSession implements AutoCloseable {
         this.connection = connection;
         this.parserConfig = parserConfig;
         this.ddl = ddl;
-        this.catalog = catalog;
-        this.transaction = transaction;
+        this.transactions = new TransactionBlock(catalog, transaction);
     }
 
     /** Значение параметра сессии, установленного через {@code SET name = value}. */
@@ -63,16 +60,28 @@ public final class SqlSession implements AutoCloseable {
         return Optional.ofNullable(settings.get(name));
     }
 
+    public TransactionStatus transactionStatus() {
+        return transactions.status();
+    }
+
     public StatementResult execute(String sql) {
         String text = ColumnPrimaryKey.toTableConstraint(calciteExplainSyntax(stripTrailingSemicolons(sql)));
         if (text.isEmpty()) {
             return new StatementResult.Empty();
         }
+        Optional<TransactionCommand> command = TransactionCommand.parse(text);
+        if (command.isPresent()) {
+            return transactions.execute(command.get());
+        }
+        return transactions.statement(() -> executeStatement(text));
+    }
+
+    private StatementResult executeStatement(String text) {
         // SET и DDL Calcite JDBC не выполняет: их обрабатываем сами, остальное отдаём Calcite.
         return switch (parse(text)) {
             case SqlSetOption set -> applySetting(set);
-            case SqlCreateTable create -> ddl.createTable(create);
-            case SqlDropTable drop -> ddl.dropTable(drop);
+            case SqlCreateTable create -> ddl.createTable(outsideTransaction(create));
+            case SqlDropTable drop -> ddl.dropTable(outsideTransaction(drop));
             case SqlExplain _ -> explain(text);
             case SqlCreate create -> throw unsupported(create.getOperator().getName());
             case SqlDrop drop -> throw unsupported(drop.getOperator().getName());
@@ -83,18 +92,23 @@ public final class SqlSession implements AutoCloseable {
     }
 
     /**
-     * Запрос или DML через Calcite, в своей транзакции (как autocommit в PostgreSQL): при успехе
-     * все изменения оператора фиксируются вместе, при ошибке не остаётся ни одного.
+     * DDL меняет каталог сразу, мимо транзакций, поэтому внутри блока BEGIN он запрещён:
+     * иначе ROLLBACK не отменил бы CREATE TABLE.
+     */
+    private <T extends SqlNode> T outsideTransaction(T ddlStatement) {
+        if (transactions.isOpen()) {
+            throw unsupported(ddlStatement.getKind().sql.replace('_', ' ') + " inside a transaction block");
+        }
+        return ddlStatement;
+    }
+
+    /**
+     * Запрос или DML через Calcite: в транзакции блока BEGIN или в своей (как autocommit
+     * в PostgreSQL), где при успехе все изменения оператора фиксируются вместе, а при ошибке
+     * не остаётся ни одного.
      */
     private StatementResult executeQuery(String text) {
-        try (KvTransaction tx = catalog.begin()) {
-            transaction.set(tx);
-            StatementResult result = executeInTransaction(text);
-            tx.commit();
-            return result;
-        } finally {
-            transaction.clear();
-        }
+        return transactions.withTransaction(() -> executeInTransaction(text));
     }
 
     private StatementResult executeInTransaction(String text) {
@@ -131,6 +145,7 @@ public final class SqlSession implements AutoCloseable {
 
     @Override
     public void close() {
+        transactions.close();
         try {
             connection.close();
         } catch (SQLException e) {

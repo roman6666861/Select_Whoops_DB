@@ -43,9 +43,10 @@ DROP TABLE IF EXISTS employees;
 - `EXPLAIN <запрос>` (как в PostgreSQL) и `EXPLAIN PLAN FOR <запрос>` (как в Calcite) — план без выполнения;
 - типы: `BOOLEAN`, `INT`, `BIGINT`, `DOUBLE`, `DECIMAL(p, s)`, `VARCHAR(n)`/`TEXT`, `DATE`, `TIMESTAMP`;
 - `PRIMARY KEY` (обязателен; составной — `PRIMARY KEY (a, b)`, из одной колонки можно и `id INT PRIMARY KEY`), `NOT NULL`; данные хранятся в RocksDB и переживают перезапуск.
+- транзакции: `BEGIN` / `START TRANSACTION`, `COMMIT`, `ROLLBACK`; уровень изоляции REPEATABLE READ (снимок на начало транзакции, конфликт одновременной записи строки — ошибка `40001`); без `BEGIN` каждый оператор выполняется в своей транзакции; DDL внутри транзакции пока нельзя.
 
 Пока не поддерживаются: `MERGE`,
-`DEFAULT`, `UNIQUE`, вторичные индексы, транзакции, пользователи и пароли.
+`DEFAULT`, `UNIQUE`, вторичные индексы, уровни изоляции READ COMMITTED и SERIALIZABLE, `SAVEPOINT`, пользователи и пароли.
 
 ## Модули
 
