@@ -1,5 +1,6 @@
 package io.github.roman6666861.swdb.storage;
 
+import org.rocksdb.ReadOptions;
 import org.rocksdb.RocksIterator;
 
 import java.util.Arrays;
@@ -19,13 +20,20 @@ public final class KvIterator implements AutoCloseable {
     private final RocksIterator iterator;
     private final byte[] from;
     private final byte[] to;
+    private final ReadOptions readOptions;
     private boolean started;
 
     /** {@code to == null} — без верхней границы. */
     KvIterator(RocksIterator iterator, byte[] from, byte[] to) {
+        this(iterator, from, to, null);
+    }
+
+    /** @param readOptions с какими настройками создан итератор; закрываются вместе с ним */
+    KvIterator(RocksIterator iterator, byte[] from, byte[] to, ReadOptions readOptions) {
         this.iterator = iterator;
         this.from = from;
         this.to = to;
+        this.readOptions = readOptions;
     }
 
     /** Переходит к следующей записи; {@code false}, если записей в диапазоне больше нет. */
@@ -51,6 +59,9 @@ public final class KvIterator implements AutoCloseable {
     @Override
     public void close() {
         iterator.close();
+        if (readOptions != null) {
+            readOptions.close();
+        }
     }
 
     /** RocksDB сравнивает ключи как беззнаковые байты, поэтому и мы — через compareUnsigned. */

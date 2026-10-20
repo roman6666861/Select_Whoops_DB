@@ -89,9 +89,18 @@ public final class Catalog {
             throw new SwdbException(SqlStates.UNDEFINED_TABLE, "table \"" + name + "\" does not exist");
         }
         int id = existing.table().id();
-        store.write(batch -> batch
-                .delete(Keys.tableMeta(id))
-                .deleteRange(Keys.dataPrefix(id), Keys.dataPrefix(id + 1)));
+        // Удаления диапазона (deleteRange) TransactionDB не поддерживает: блокировки в нём
+        // ставятся на отдельные ключи. Поэтому строки удаляются по одной, но одним пакетом.
+        List<byte[]> rows = new ArrayList<>();
+        try (KvIterator it = store.scan(Keys.dataPrefix(id))) {
+            while (it.next()) {
+                rows.add(it.key());
+            }
+        }
+        store.write(batch -> {
+            batch.delete(Keys.tableMeta(id));
+            rows.forEach(batch::delete);
+        });
         tables.remove(name);
         return true;
     }

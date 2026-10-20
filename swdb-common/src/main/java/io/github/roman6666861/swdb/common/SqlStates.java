@@ -17,6 +17,9 @@ public final class SqlStates {
     public static final String STRING_DATA_RIGHT_TRUNCATION = "22001";
     public static final String NUMERIC_VALUE_OUT_OF_RANGE = "22003";
     public static final String DIVISION_BY_ZERO = "22012";
+    public static final String SERIALIZATION_FAILURE = "40001";
+    public static final String DEADLOCK_DETECTED = "40P01";
+    public static final String LOCK_NOT_AVAILABLE = "55P03";
     public static final String FEATURE_NOT_SUPPORTED = "0A000";
     public static final String PROTOCOL_VIOLATION = "08P01";
     public static final String INTERNAL_ERROR = "XX000";

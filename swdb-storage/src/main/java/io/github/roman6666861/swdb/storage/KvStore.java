@@ -5,12 +5,15 @@ import io.github.roman6666861.swdb.common.SwdbException;
 import org.rocksdb.Options;
 import org.rocksdb.RocksDB;
 import org.rocksdb.RocksDBException;
+import org.rocksdb.TransactionDB;
+import org.rocksdb.TransactionDBOptions;
 import org.rocksdb.WriteBatch;
 import org.rocksdb.WriteOptions;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.function.Consumer;
 
 /**
@@ -19,6 +22,10 @@ import java.util.function.Consumer;
  * <p>
  * Ключи сравниваются побайтово как беззнаковые числа, поэтому скан по префиксу
  * возвращает записи в порядке, заданном кодированием ключей (см. {@link KeyBuilder}).
+ * <p>
+ * База открывается как {@link TransactionDB}: кроме одиночных операций ниже, она умеет
+ * транзакции с блокировками ключей ({@link #begin()}). Одиночные операции тоже берут
+ * блокировки на время записи, поэтому не обходят транзакции, а ждут их.
  */
 public final class KvStore implements AutoCloseable {
 
@@ -26,12 +33,17 @@ public final class KvStore implements AutoCloseable {
         RocksDB.loadLibrary();
     }
 
-    private final Options options;
-    private final WriteOptions writeOptions;
-    private final RocksDB db;
+    /** Сколько транзакция ждёт чужую блокировку ключа; взаимные блокировки находятся сразу. */
+    public static final Duration DEFAULT_LOCK_TIMEOUT = Duration.ofSeconds(10);
 
-    private KvStore(Options options, RocksDB db) {
+    private final Options options;
+    private final TransactionDBOptions transactionOptions;
+    private final WriteOptions writeOptions;
+    private final TransactionDB db;
+
+    private KvStore(Options options, TransactionDBOptions transactionOptions, TransactionDB db) {
         this.options = options;
+        this.transactionOptions = transactionOptions;
         this.writeOptions = new WriteOptions();
         this.db = db;
     }
@@ -44,12 +56,25 @@ public final class KvStore implements AutoCloseable {
             throw new SwdbException(SqlStates.INTERNAL_ERROR, "cannot create data directory " + dir, e);
         }
         Options options = new Options().setCreateIfMissing(true);
+        TransactionDBOptions transactionOptions = new TransactionDBOptions();
         try {
-            return new KvStore(options, RocksDB.open(options, dir.toAbsolutePath().toString()));
+            return new KvStore(options, transactionOptions,
+                    TransactionDB.open(options, transactionOptions, dir.toAbsolutePath().toString()));
         } catch (RocksDBException e) {
+            transactionOptions.close();
             options.close();
             throw storageError("cannot open storage at " + dir, e);
         }
+    }
+
+    /** Новая транзакция с {@link #DEFAULT_LOCK_TIMEOUT ожиданием блокировок по умолчанию}. */
+    public KvTransaction begin() {
+        return begin(DEFAULT_LOCK_TIMEOUT);
+    }
+
+    /** Новая транзакция; её снимок данных берётся в момент вызова. Обязательно закрывать. */
+    public KvTransaction begin(Duration lockTimeout) {
+        return new KvTransaction(db, writeOptions, lockTimeout);
     }
 
     public byte[] get(byte[] key) {
@@ -108,6 +133,7 @@ public final class KvStore implements AutoCloseable {
     public void close() {
         writeOptions.close();
         db.close();
+        transactionOptions.close();
         options.close();
     }
 
@@ -138,16 +164,6 @@ public final class KvStore implements AutoCloseable {
                 batch.delete(key);
             } catch (RocksDBException e) {
                 throw storageError("delete failed", e);
-            }
-            return this;
-        }
-
-        /** Удаляет все ключи в диапазоне {@code [from, to)}. */
-        public Batch deleteRange(byte[] from, byte[] to) {
-            try {
-                batch.deleteRange(from, to);
-            } catch (RocksDBException e) {
-                throw storageError("deleteRange failed", e);
             }
             return this;
         }

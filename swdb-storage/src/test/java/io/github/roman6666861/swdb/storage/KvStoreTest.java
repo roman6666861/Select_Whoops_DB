@@ -77,7 +77,8 @@ class KvStoreTest {
             store.put(bytes("u1"), bytes("3"));
 
             store.write(batch -> batch
-                    .deleteRange(bytes("t"), bytes("u"))
+                    .delete(bytes("t1"))
+                    .delete(bytes("t2"))
                     .put(bytes("meta"), bytes("dropped")));
 
             assertThat(scanKeys(store, "t")).isEmpty();
