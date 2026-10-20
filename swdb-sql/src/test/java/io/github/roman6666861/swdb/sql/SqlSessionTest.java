@@ -366,6 +366,24 @@ class SqlSessionTest {
     }
 
     @Test
+    void numericErrorsHaveSqlState() {
+        session.execute("CREATE TABLE t (id INT, i INT, p DECIMAL(5, 2), PRIMARY KEY (id))");
+        session.execute("INSERT INTO t VALUES (1, 1, 1)");
+
+        assertSqlState(() -> session.execute("INSERT INTO t VALUES (2, 1, 12345.6)"), SqlStates.NUMERIC_VALUE_OUT_OF_RANGE);
+        assertSqlState(() -> session.execute("INSERT INTO t VALUES (2, 3000000000, 1)"), SqlStates.NUMERIC_VALUE_OUT_OF_RANGE);
+        assertSqlState(() -> session.execute("UPDATE t SET p = p * 100000"), SqlStates.NUMERIC_VALUE_OUT_OF_RANGE);
+        assertSqlState(() -> session.execute("SELECT CAST(12345.6 AS DECIMAL(5, 2))"), SqlStates.NUMERIC_VALUE_OUT_OF_RANGE);
+        // Константа вычисляется при загрузке сгенерированного класса: ошибка приходит как ExceptionInInitializerError.
+        assertSqlState(() -> session.execute("SELECT 1 / 0"), SqlStates.DIVISION_BY_ZERO);
+        assertSqlState(() -> session.execute("SELECT i / 0 FROM t"), SqlStates.DIVISION_BY_ZERO);
+        assertSqlState(() -> session.execute("SELECT p / 0 FROM t"), SqlStates.DIVISION_BY_ZERO);
+        assertSqlState(() -> session.execute("SELECT MOD(i, 0) FROM t"), SqlStates.DIVISION_BY_ZERO);
+
+        assertThat(rows("SELECT id, i, p FROM t")).containsExactly(List.of(1, 1, new BigDecimal("1.00")));
+    }
+
+    @Test
     void explainShowsPlanLineByLine() {
         session.execute("CREATE TABLE t (id INT, v INT, PRIMARY KEY (id))");
 

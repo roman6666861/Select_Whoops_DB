@@ -84,6 +84,10 @@ public final class SqlSession implements AutoCloseable {
             return new StatementResult.Update(firstKeyword(text), statement.getLargeUpdateCount());
         } catch (SQLException | RuntimeException e) {
             throw translate(e);
+        } catch (ExceptionInInitializerError e) {
+            // Константы вроде 1 / 0 вычисляются в статическом инициализаторе сгенерированного класса,
+            // и исключение приходит обёрнутым в Error.
+            throw translate(e);
         } catch (AssertionError e) {
             // Calcite проверяет свои инварианты через assert; клиент должен получить ошибку, а не обрыв связи.
             throw new SwdbException(SqlStates.INTERNAL_ERROR, "internal error: " + e.getMessage(), e);
@@ -175,13 +179,16 @@ public final class SqlSession implements AutoCloseable {
      * Ищет в цепочке причин понятную ошибку и назначает ей SQLSTATE: нашу собственную
      * (например, нарушение первичного ключа при INSERT), ошибку парсера или валидатора Calcite.
      */
-    private static SwdbException translate(Exception e) {
+    private static SwdbException translate(Throwable e) {
         for (Throwable t = e; t != null; t = t.getCause()) {
             if (t instanceof SwdbException swdb) {
                 return swdb;
             }
         }
         for (Throwable t = e; t != null; t = t.getCause()) {
+            if (t instanceof ArithmeticException arithmetic) {
+                return arithmeticError(arithmetic, e);
+            }
             if (t instanceof SqlParseException) {
                 return new SwdbException(SqlStates.SYNTAX_ERROR, t.getMessage(), e);
             }
@@ -190,6 +197,19 @@ public final class SqlSession implements AutoCloseable {
             }
         }
         return new SwdbException(SqlStates.INTERNAL_ERROR, e.getMessage(), e);
+    }
+
+    /**
+     * Ошибка вычисления: деление на ноль или число, которое не помещается в тип
+     * ({@code Value 12345.6 cannot be represented as a DECIMAL(5, 2)}).
+     * Java пишет «/ by zero» для целых и «Division by zero» для BigDecimal.
+     */
+    private static SwdbException arithmeticError(ArithmeticException arithmetic, Throwable e) {
+        String message = String.valueOf(arithmetic.getMessage());
+        if (message.toLowerCase(Locale.ROOT).contains("by zero")) {
+            return new SwdbException(SqlStates.DIVISION_BY_ZERO, "division by zero", e);
+        }
+        return new SwdbException(SqlStates.NUMERIC_VALUE_OUT_OF_RANGE, message, e);
     }
 
     /** У валидатора Calcite нет кодов ошибок, поэтому самые частые различаем по тексту. */
