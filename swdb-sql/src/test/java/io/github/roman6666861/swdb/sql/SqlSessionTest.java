@@ -94,7 +94,7 @@ class SqlSessionTest {
                 FROM emp e JOIN dept d ON e.dept_id = d.id
                 WHERE e.salary > 60
                 GROUP BY d.title
-                ORDER BY total DESC""")).containsExactly(List.of("dev", 300), List.of("ops", 70));
+                ORDER BY total DESC""")).containsExactly(List.of("dev", 300L), List.of("ops", 70L));
     }
 
     @Test
@@ -402,6 +402,20 @@ class SqlSessionTest {
         // В пределах типа — как раньше; результат не помещается в INT, но помещается в BIGINT.
         assertThat(rows("SELECT i - 1, CAST(i AS BIGINT) + 1 FROM t")).containsExactly(List.of(2147483646, 2147483648L));
         assertThat(rows("SELECT i FROM t")).containsExactly(List.of(2147483647));
+    }
+
+    @Test
+    void sumOfIntegersIsBigint() {
+        session.execute("CREATE TABLE t (id INT, i INT, PRIMARY KEY (id))");
+        session.execute("INSERT INTO t VALUES (1, 2147483647), (2, 2)");
+
+        // Сумма не помещается в INT, но SUM(int) имеет тип BIGINT, как в PostgreSQL.
+        assertThat(rows("SELECT SUM(i) FROM t")).containsExactly(List.of(2147483649L));
+        assertThat(rows("SELECT SUM(i) OVER (ORDER BY id) FROM t")).containsExactly(List.of(2147483647L), List.of(2147483649L));
+        StatementResult result = session.execute("SELECT SUM(i) FROM t");
+        assertThat(((StatementResult.Rows) result).columns().getFirst().jdbcType()).isEqualTo(java.sql.Types.BIGINT);
+        // AVG делит сумму в типе аргумента: вместо мусора — ошибка.
+        assertSqlState(() -> session.execute("SELECT AVG(i) FROM t"), SqlStates.NUMERIC_VALUE_OUT_OF_RANGE);
     }
 
     @Test
