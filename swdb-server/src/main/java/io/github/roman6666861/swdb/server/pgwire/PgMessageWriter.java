@@ -95,6 +95,43 @@ final class PgMessageWriter {
         return end();
     }
 
+    // ---- extended query protocol ----
+
+    PgMessageWriter parseComplete() {
+        begin('1');
+        return end();
+    }
+
+    PgMessageWriter bindComplete() {
+        begin('2');
+        return end();
+    }
+
+    PgMessageWriter closeComplete() {
+        begin('3');
+        return end();
+    }
+
+    /** Ответ на Describe оператора: OID типа каждого параметра. */
+    PgMessageWriter parameterDescription(List<Integer> typeOids) {
+        begin('t');
+        buf.writeShort(typeOids.size());
+        typeOids.forEach(buf::writeInt);
+        return end();
+    }
+
+    /** Ответ на Describe оператора или портала, который не возвращает строк. */
+    PgMessageWriter noData() {
+        begin('n');
+        return end();
+    }
+
+    /** Execute выдал столько строк, сколько просил клиент, но строки ещё остались. */
+    PgMessageWriter portalSuspended() {
+        begin('s');
+        return end();
+    }
+
     PgMessageWriter errorResponse(String sqlState, String message) {
         begin('E');
         buf.writeByte('S');

@@ -88,16 +88,25 @@ public final class PgConnectionHandler extends SimpleChannelInboundHandler<Front
                 send(ctx, w -> w.readyForQuery(status));
             }
             case FrontendMessage.Terminate _ -> ctx.close();
-            case FrontendMessage.Unsupported unsupported -> {
-                // После ошибки в extended protocol клиент ждёт ReadyForQuery только на Sync.
-                if (!skipUntilSync) {
-                    skipUntilSync = true;
-                    send(ctx, w -> w.errorResponse(SqlStates.FEATURE_NOT_SUPPORTED,
-                            "message type '" + unsupported.type() + "' is not supported yet"));
-                }
-            }
+            // Extended query protocol разбирается, но пока не выполняется.
+            case FrontendMessage.Parse _ -> unsupported(ctx, 'P');
+            case FrontendMessage.Bind _ -> unsupported(ctx, 'B');
+            case FrontendMessage.Describe _ -> unsupported(ctx, 'D');
+            case FrontendMessage.Execute _ -> unsupported(ctx, 'E');
+            case FrontendMessage.Close _ -> unsupported(ctx, 'C');
+            case FrontendMessage.Flush _ -> unsupported(ctx, 'H');
+            case FrontendMessage.Unsupported unsupported -> unsupported(ctx, unsupported.type());
             case FrontendMessage.SslRequest _, FrontendMessage.GssEncRequest _, FrontendMessage.CancelRequest _ ->
                     throw new IllegalStateException("handled on event loop: " + message);
+        }
+    }
+
+    private void unsupported(ChannelHandlerContext ctx, char type) {
+        // После ошибки в extended protocol клиент ждёт ReadyForQuery только на Sync.
+        if (!skipUntilSync) {
+            skipUntilSync = true;
+            send(ctx, w -> w.errorResponse(SqlStates.FEATURE_NOT_SUPPORTED,
+                    "message type '" + type + "' is not supported yet"));
         }
     }
 

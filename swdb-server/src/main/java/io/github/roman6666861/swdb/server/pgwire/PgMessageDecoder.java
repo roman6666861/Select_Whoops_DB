@@ -6,6 +6,7 @@ import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.codec.ByteToMessageDecoder;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -71,12 +72,87 @@ public final class PgMessageDecoder extends ByteToMessageDecoder {
         char type = (char) in.readByte();
         in.skipBytes(4);
         ByteBuf body = in.readSlice(length - 4);
-        out.add(switch (type) {
-            case 'Q' -> new FrontendMessage.Query(readCString(body));
-            case 'S' -> new FrontendMessage.Sync();
-            case 'X' -> new FrontendMessage.Terminate();
-            default -> new FrontendMessage.Unsupported(type);
-        });
+        out.add(readTyped(type, body));
+    }
+
+    private static FrontendMessage readTyped(char type, ByteBuf body) {
+        FrontendMessage message;
+        try {
+            message = switch (type) {
+                case 'Q' -> new FrontendMessage.Query(readCString(body));
+                case 'P' -> new FrontendMessage.Parse(readCString(body), readCString(body), readInts(body));
+                case 'B' -> readBind(body);
+                case 'D' -> new FrontendMessage.Describe(readTarget(body), readCString(body));
+                case 'E' -> new FrontendMessage.Execute(readCString(body), body.readInt());
+                case 'C' -> new FrontendMessage.Close(readTarget(body), readCString(body));
+                case 'H' -> new FrontendMessage.Flush();
+                case 'S' -> new FrontendMessage.Sync();
+                case 'X' -> new FrontendMessage.Terminate();
+                default -> new FrontendMessage.Unsupported(type);
+            };
+        } catch (IndexOutOfBoundsException e) {
+            // Поля сообщения обещают больше байт, чем в нём есть.
+            throw protocolViolation("message '" + type + "' is too short");
+        }
+        if (body.isReadable() && !(message instanceof FrontendMessage.Unsupported)) {
+            throw protocolViolation("unexpected " + body.readableBytes() + " bytes at the end of message '" + type + "'");
+        }
+        return message;
+    }
+
+    /**
+     * {@code String portal, String statement, Int16 n, Int16[n] форматы параметров,
+     * Int16 m, m × (Int32 длина или -1 для NULL, байты значения), Int16 k, Int16[k] форматы колонок}.
+     */
+    private static FrontendMessage.Bind readBind(ByteBuf body) {
+        String portal = readCString(body);
+        String statement = readCString(body);
+        List<Integer> parameterFormats = readShorts(body);
+        int count = body.readUnsignedShort();
+        List<byte[]> parameters = new ArrayList<>(count);
+        for (int i = 0; i < count; i++) {
+            int length = body.readInt();
+            if (length < -1) {
+                throw protocolViolation("invalid parameter length " + length);
+            }
+            byte[] value = null;
+            if (length >= 0) {
+                value = new byte[length];
+                body.readBytes(value);
+            }
+            parameters.add(value);
+        }
+        return new FrontendMessage.Bind(portal, statement, parameterFormats, parameters, readShorts(body));
+    }
+
+    /** {@code Int16 n, Int16[n]}. */
+    private static List<Integer> readShorts(ByteBuf body) {
+        int count = body.readUnsignedShort();
+        List<Integer> values = new ArrayList<>(count);
+        for (int i = 0; i < count; i++) {
+            values.add((int) body.readShort());
+        }
+        return values;
+    }
+
+    /** {@code Int16 n, Int32[n]}. */
+    private static List<Integer> readInts(ByteBuf body) {
+        int count = body.readUnsignedShort();
+        List<Integer> values = new ArrayList<>(count);
+        for (int i = 0; i < count; i++) {
+            values.add(body.readInt());
+        }
+        return values;
+    }
+
+    /** {@code 'S'} — подготовленный оператор, {@code 'P'} — портал. */
+    private static FrontendMessage.Target readTarget(ByteBuf body) {
+        byte target = body.readByte();
+        return switch (target) {
+            case 'S' -> FrontendMessage.Target.STATEMENT;
+            case 'P' -> FrontendMessage.Target.PORTAL;
+            default -> throw protocolViolation("invalid describe/close target '" + (char) target + "'");
+        };
     }
 
     private static Map<String, String> readParameters(ByteBuf body) {
