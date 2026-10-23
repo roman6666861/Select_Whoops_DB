@@ -10,6 +10,7 @@ import org.apache.calcite.sql.SqlNode;
 import org.apache.calcite.sql.SqlCreate;
 import org.apache.calcite.sql.SqlDrop;
 import org.apache.calcite.sql.SqlExplain;
+import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql.SqlMerge;
 import org.apache.calcite.sql.SqlSetOption;
 import org.apache.calcite.sql.ddl.SqlCreateTable;
@@ -18,6 +19,8 @@ import org.apache.calcite.sql.parser.SqlParseException;
 import org.apache.calcite.sql.parser.SqlParser;
 
 import java.sql.Connection;
+import java.sql.ParameterMetaData;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
@@ -40,6 +43,7 @@ public final class SqlSession implements AutoCloseable {
 
     /** {@code EXPLAIN <запрос>} в стиле PostgreSQL, но не {@code EXPLAIN PLAN ...} в стиле Calcite. */
     private static final Pattern POSTGRES_EXPLAIN = Pattern.compile("(?is)explain\\s+(?!plan\\s)(.+)");
+    private static final Column QUERY_PLAN = new Column("QUERY PLAN", Types.VARCHAR);
 
     private final Connection connection;
     private final SqlParser.Config parserConfig;
@@ -65,7 +69,39 @@ public final class SqlSession implements AutoCloseable {
     }
 
     public StatementResult execute(String sql) {
-        String text = ColumnPrimaryKey.toTableConstraint(calciteExplainSyntax(stripTrailingSemicolons(sql)));
+        return executeNormalized(normalize(sql));
+    }
+
+    /**
+     * Готовит оператор к многократному выполнению с параметрами {@code $1, $2, ...}
+     * (extended query protocol PostgreSQL). SELECT, INSERT, UPDATE и DELETE разбираются
+     * и планируются здесь один раз; остальное (BEGIN, SET, DDL, EXPLAIN) параметров не принимает
+     * и при выполнении идёт обычным путём, как {@link #execute}.
+     */
+    public PreparedQuery prepare(String sql) {
+        String text = normalize(sql);
+        if (text.isEmpty() || TransactionCommand.parse(text).isPresent()) {
+            // Команды транзакции готовятся и в сломанной транзакции: иначе не выполнить ROLLBACK.
+            return new DeferredQuery(text, List.of());
+        }
+        return transactions.statement(() -> prepareStatement(text));
+    }
+
+    private PreparedQuery prepareStatement(String text) {
+        Placeholders placeholders = Placeholders.of(text);
+        SqlNode node = parse(placeholders.sql());
+        if (node instanceof SqlSetOption || node instanceof SqlExplain || node instanceof SqlCreate
+                || node instanceof SqlDrop || node instanceof SqlMerge) {
+            if (placeholders.count() > 0) {
+                throw unsupported("parameters in " + firstKeyword(text));
+            }
+            return new DeferredQuery(text, node instanceof SqlExplain ? List.of(QUERY_PLAN) : List.of());
+        }
+        boolean returnsRows = node.getKind().belongsTo(SqlKind.QUERY);
+        return jdbc(() -> new CalciteQuery(connection.prepareStatement(placeholders.sql()), text, placeholders, returnsRows));
+    }
+
+    private StatementResult executeNormalized(String text) {
         if (text.isEmpty()) {
             return new StatementResult.Empty();
         }
@@ -112,13 +148,32 @@ public final class SqlSession implements AutoCloseable {
     }
 
     private StatementResult executeInTransaction(String text) {
-        try (Statement statement = connection.createStatement()) {
-            if (statement.execute(text)) {
-                try (ResultSet rs = statement.getResultSet()) {
-                    return readRows(rs);
-                }
+        return jdbc(() -> {
+            try (Statement statement = connection.createStatement()) {
+                return result(statement, statement.execute(text), text);
             }
-            return new StatementResult.Update(firstKeyword(text), statement.getLargeUpdateCount());
+        });
+    }
+
+    /** Результат выполненного оператора: строки или число изменённых строк. */
+    private static StatementResult result(Statement statement, boolean hasRows, String text) throws SQLException {
+        if (hasRows) {
+            try (ResultSet rs = statement.getResultSet()) {
+                return readRows(rs);
+            }
+        }
+        return new StatementResult.Update(firstKeyword(text), statement.getLargeUpdateCount());
+    }
+
+    @FunctionalInterface
+    private interface JdbcCall<T> {
+        T call() throws SQLException;
+    }
+
+    /** Вызов JDBC-драйвера Calcite: его ошибки переводятся в {@link SwdbException} с SQLSTATE. */
+    private static <T> T jdbc(JdbcCall<T> call) {
+        try {
+            return call.call();
         } catch (SQLException | RuntimeException e) {
             throw translate(e);
         } catch (ExceptionInInitializerError e) {
@@ -140,7 +195,113 @@ public final class SqlSession implements AutoCloseable {
         StatementResult.Rows result = (StatementResult.Rows) executeQuery(text);
         String plan = (String) result.rows().getFirst().getFirst();
         List<List<Object>> lines = plan.lines().map(line -> List.<Object>of(line)).toList();
-        return new StatementResult.Rows(List.of(new Column("QUERY PLAN", Types.VARCHAR)), lines);
+        return new StatementResult.Rows(List.of(QUERY_PLAN), lines);
+    }
+
+    /** Оператор, который не готовится заранее, а при выполнении идёт обычным путём {@link #execute}. */
+    private final class DeferredQuery implements PreparedQuery {
+
+        private final String text;
+        private final List<Column> columns;
+
+        DeferredQuery(String text, List<Column> columns) {
+            this.text = text;
+            this.columns = columns;
+        }
+
+        @Override
+        public List<Integer> parameterTypes() {
+            return List.of();
+        }
+
+        @Override
+        public List<Column> columns() {
+            return columns;
+        }
+
+        @Override
+        public StatementResult execute(List<Object> parameters) {
+            checkParameterCount(parameters, 0);
+            return executeNormalized(text);
+        }
+
+        @Override
+        public void close() {
+        }
+    }
+
+    /**
+     * SELECT или DML, подготовленный Calcite: разбор, проверка и план — один раз, при создании.
+     * Типы параметров Calcite выводит из того, где они стоят: в {@code WHERE id = ?} это тип
+     * колонки {@code id}, в {@code INSERT INTO t VALUES (?, ?)} — типы колонок таблицы.
+     */
+    private final class CalciteQuery implements PreparedQuery {
+
+        private final PreparedStatement statement;
+        private final String text;
+        private final Placeholders placeholders;
+        private final List<Integer> parameterTypes;
+        private final List<Column> columns;
+
+        CalciteQuery(PreparedStatement statement, String text, Placeholders placeholders, boolean returnsRows)
+                throws SQLException {
+            this.statement = statement;
+            this.text = text;
+            this.placeholders = placeholders;
+            ParameterMetaData meta = statement.getParameterMetaData();
+            Integer[] types = new Integer[placeholders.count()];
+            for (int position = 0; position < placeholders.order().size(); position++) {
+                int parameter = placeholders.order().get(position);
+                if (types[parameter] == null) {
+                    types[parameter] = meta.getParameterType(position + 1);
+                }
+            }
+            // Номер, который ни разу не встретился в тексте ($1 и $3 без $2), считаем строкой.
+            this.parameterTypes = Arrays.stream(types).map(t -> t == null ? Types.VARCHAR : t).toList();
+            this.columns = returnsRows ? SqlSession.columns(statement.getMetaData()) : List.of();
+        }
+
+        @Override
+        public List<Integer> parameterTypes() {
+            return parameterTypes;
+        }
+
+        @Override
+        public List<Column> columns() {
+            return columns;
+        }
+
+        @Override
+        public StatementResult execute(List<Object> parameters) {
+            checkParameterCount(parameters, placeholders.count());
+            return transactions.statement(() -> transactions.withTransaction(() -> jdbc(() -> {
+                for (int position = 0; position < placeholders.order().size(); position++) {
+                    int parameter = placeholders.order().get(position);
+                    Object value = parameters.get(parameter);
+                    if (value == null) {
+                        statement.setNull(position + 1, parameterTypes.get(parameter));
+                    } else {
+                        statement.setObject(position + 1, value);
+                    }
+                }
+                return result(statement, statement.execute(), text);
+            })));
+        }
+
+        @Override
+        public void close() {
+            jdbc(() -> {
+                statement.close();
+                return null;
+            });
+        }
+    }
+
+    private static void checkParameterCount(List<Object> parameters, int expected) {
+        if (parameters.size() != expected) {
+            throw new SwdbException(SqlStates.PROTOCOL_VIOLATION, "bind message supplies " + parameters.size()
+                    + " parameters, but prepared statement requires " + expected);
+        }
     }
 
     @Override
@@ -174,12 +335,8 @@ public final class SqlSession implements AutoCloseable {
     }
 
     private static StatementResult.Rows readRows(ResultSet rs) throws SQLException {
-        ResultSetMetaData meta = rs.getMetaData();
-        int count = meta.getColumnCount();
-        List<Column> columns = new ArrayList<>(count);
-        for (int i = 1; i <= count; i++) {
-            columns.add(new Column(meta.getColumnLabel(i), meta.getColumnType(i)));
-        }
+        List<Column> columns = columns(rs.getMetaData());
+        int count = columns.size();
         List<List<Object>> rows = new ArrayList<>();
         while (rs.next()) {
             Object[] row = new Object[count];
@@ -189,6 +346,19 @@ public final class SqlSession implements AutoCloseable {
             rows.add(Arrays.asList(row));
         }
         return new StatementResult.Rows(columns, rows);
+    }
+
+    private static List<Column> columns(ResultSetMetaData meta) throws SQLException {
+        int count = meta.getColumnCount();
+        List<Column> columns = new ArrayList<>(count);
+        for (int i = 1; i <= count; i++) {
+            columns.add(new Column(meta.getColumnLabel(i), meta.getColumnType(i)));
+        }
+        return columns;
+    }
+
+    private static String normalize(String sql) {
+        return ColumnPrimaryKey.toTableConstraint(calciteExplainSyntax(stripTrailingSemicolons(sql)));
     }
 
     private static String stripTrailingSemicolons(String sql) {

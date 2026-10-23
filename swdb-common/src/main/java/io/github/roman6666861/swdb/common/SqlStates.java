@@ -9,6 +9,7 @@ public final class SqlStates {
     public static final String SYNTAX_ERROR_OR_ACCESS_RULE_VIOLATION = "42000";
     public static final String UNDEFINED_TABLE = "42P01";
     public static final String UNDEFINED_COLUMN = "42703";
+    public static final String UNDEFINED_PARAMETER = "42P02";
     public static final String DUPLICATE_TABLE = "42P07";
     public static final String DUPLICATE_COLUMN = "42701";
     public static final String INVALID_TABLE_DEFINITION = "42P16";
