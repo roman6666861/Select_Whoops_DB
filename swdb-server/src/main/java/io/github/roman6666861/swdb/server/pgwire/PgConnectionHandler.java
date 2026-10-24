@@ -36,6 +36,7 @@ public final class PgConnectionHandler extends SimpleChannelInboundHandler<Front
 
     // Доступны только из задач цепочки tail.
     private SqlSession session;
+    private ExtendedProtocol extended;
     private boolean skipUntilSync;
 
     public PgConnectionHandler(SqlEngine engine, Executor executor) {
@@ -85,19 +86,38 @@ public final class PgConnectionHandler extends SimpleChannelInboundHandler<Front
             case FrontendMessage.Sync _ -> {
                 skipUntilSync = false;
                 char status = transactionStatus();
+                extended.sync(status != PgMessageWriter.IDLE);
                 send(ctx, w -> w.readyForQuery(status));
             }
             case FrontendMessage.Terminate _ -> ctx.close();
-            // Extended query protocol разбирается, но пока не выполняется.
-            case FrontendMessage.Parse _ -> unsupported(ctx, 'P');
-            case FrontendMessage.Bind _ -> unsupported(ctx, 'B');
-            case FrontendMessage.Describe _ -> unsupported(ctx, 'D');
-            case FrontendMessage.Execute _ -> unsupported(ctx, 'E');
-            case FrontendMessage.Close _ -> unsupported(ctx, 'C');
-            case FrontendMessage.Flush _ -> unsupported(ctx, 'H');
+            case FrontendMessage.Parse parse -> extendedStep(ctx, w -> extended.parse(parse, w));
+            case FrontendMessage.Bind bind -> extendedStep(ctx, w -> extended.bind(bind, w));
+            case FrontendMessage.Describe describe -> extendedStep(ctx, w -> extended.describe(describe, w));
+            case FrontendMessage.Execute execute -> extendedStep(ctx, w -> extended.execute(execute, w));
+            case FrontendMessage.Close close -> extendedStep(ctx, w -> extended.close(close, w));
+            // Ответы и так отправляются сразу, копить нечего.
+            case FrontendMessage.Flush _ -> {
+            }
             case FrontendMessage.Unsupported unsupported -> unsupported(ctx, unsupported.type());
             case FrontendMessage.SslRequest _, FrontendMessage.GssEncRequest _, FrontendMessage.CancelRequest _ ->
                     throw new IllegalStateException("handled on event loop: " + message);
+        }
+    }
+
+    /**
+     * Шаг extended protocol. После ошибки PostgreSQL пропускает все сообщения до Sync и только
+     * на нём отвечает ReadyForQuery: клиент шлёт Parse/Bind/Execute пачкой, не дожидаясь ответов,
+     * и выполнять Execute после неудачного Bind было бы неверно.
+     */
+    private void extendedStep(ChannelHandlerContext ctx, Consumer<PgMessageWriter> step) {
+        if (skipUntilSync) {
+            return;
+        }
+        try {
+            send(ctx, step);
+        } catch (SwdbException e) {
+            skipUntilSync = true;
+            send(ctx, w -> w.errorResponse(e.sqlState(), e.getMessage()));
         }
     }
 
@@ -118,6 +138,7 @@ public final class PgConnectionHandler extends SimpleChannelInboundHandler<Front
             return;
         }
         session = engine.openSession();
+        extended = new ExtendedProtocol(session);
         String applicationName = startup.parameters().getOrDefault("application_name", "");
         log.debug("Client connected: {} {}", ctx.channel().remoteAddress(), startup.parameters());
         send(ctx, w -> w
@@ -135,6 +156,7 @@ public final class PgConnectionHandler extends SimpleChannelInboundHandler<Front
     }
 
     private void query(ChannelHandlerContext ctx, String sql) {
+        extended.simpleQuery();
         StatementResult result;
         try {
             result = session.execute(sql);
@@ -178,7 +200,7 @@ public final class PgConnectionHandler extends SimpleChannelInboundHandler<Front
         };
     }
 
-    private static String commandTag(StatementResult.Update update) {
+    static String commandTag(StatementResult.Update update) {
         return switch (update.command()) {
             case "INSERT" -> "INSERT 0 " + update.count();
             case "UPDATE", "DELETE", "MERGE" -> update.command() + " " + update.count();

@@ -15,6 +15,11 @@ public final class SqlStates {
     public static final String INVALID_TABLE_DEFINITION = "42P16";
     public static final String UNIQUE_VIOLATION = "23505";
     public static final String NOT_NULL_VIOLATION = "23502";
+    public static final String DUPLICATE_PREPARED_STATEMENT = "42P05";
+    public static final String DUPLICATE_CURSOR = "42P03";
+    public static final String INVALID_SQL_STATEMENT_NAME = "26000";
+    public static final String INVALID_CURSOR_NAME = "34000";
+    public static final String INVALID_TEXT_REPRESENTATION = "22P02";
     public static final String STRING_DATA_RIGHT_TRUNCATION = "22001";
     public static final String NUMERIC_VALUE_OUT_OF_RANGE = "22003";
     public static final String DIVISION_BY_ZERO = "22012";
