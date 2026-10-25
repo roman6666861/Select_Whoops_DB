@@ -2,6 +2,7 @@ package io.github.roman6666861.swdb.catalog;
 
 import io.github.roman6666861.swdb.common.SqlStates;
 import io.github.roman6666861.swdb.common.SwdbException;
+import io.github.roman6666861.swdb.storage.KvIterator;
 import io.github.roman6666861.swdb.storage.KvStore;
 import io.github.roman6666861.swdb.storage.KvTransaction;
 import org.junit.jupiter.api.AfterEach;
@@ -126,6 +127,107 @@ class CatalogTest {
                 .satisfies(e -> assertSqlState(e, SqlStates.UNDEFINED_COLUMN));
         assertThatThrownBy(() -> catalog.createTable("t", USERS, List.of("balance"), false))
                 .satisfies(e -> assertSqlState(e, SqlStates.FEATURE_NOT_SUPPORTED));
+    }
+
+    @Test
+    void createIndexFillsEntriesForExistingRows() {
+        catalog.createTable("users", USERS, List.of("id"), false);
+        TableStore users = catalog.table("users").orElseThrow();
+        insert(users, new Object[]{1, "bob", null});
+        insert(users, new Object[]{2, null, null});
+        insert(users, new Object[]{3, "ann", null});
+
+        assertThat(catalog.createIndex("users", "users_name", List.of("name"), false)).isTrue();
+
+        TableDef table = catalog.table("users").orElseThrow().table();
+        IndexDef index = table.indexes().getFirst();
+        assertThat(index).isEqualTo(new IndexDef(1, "users_name", List.of(1)));
+        // Записи в порядке значения (NULL первым), в значении — ключ строки.
+        RowCodec codec = new RowCodec(table);
+        assertThat(entries(table.id(), index.id())).containsExactly(
+                new Object[]{codec.encodeIndexKey(index, new Object[]{2, null, null}), codec.encodeKey(new Object[]{2})},
+                new Object[]{codec.encodeIndexKey(index, new Object[]{3, "ann", null}), codec.encodeKey(new Object[]{3})},
+                new Object[]{codec.encodeIndexKey(index, new Object[]{1, "bob", null}), codec.encodeKey(new Object[]{1})});
+    }
+
+    @Test
+    void indexesSurviveRestart() {
+        catalog.createTable("users", USERS, List.of("id"), false);
+        catalog.createIndex("users", "users_name", List.of("name"), false);
+        catalog.createIndex("users", "users_name_id", List.of("name", "id"), false);
+        store.close();
+
+        store = KvStore.open(dir);
+        catalog = new Catalog(store);
+
+        assertThat(catalog.table("users").orElseThrow().table().indexes()).containsExactly(
+                new IndexDef(1, "users_name", List.of(1)),
+                new IndexDef(2, "users_name_id", List.of(1, 0)));
+    }
+
+    @Test
+    void dropIndexRemovesEntries() {
+        catalog.createTable("users", USERS, List.of("id"), false);
+        insert(catalog.table("users").orElseThrow(), new Object[]{1, "bob", null});
+        catalog.createIndex("users", "users_name", List.of("name"), false);
+        int tableId = catalog.table("users").orElseThrow().table().id();
+
+        assertThat(catalog.dropIndex("users_name", false)).isTrue();
+
+        assertThat(catalog.table("users").orElseThrow().table().indexes()).isEmpty();
+        assertThat(entries(tableId, 1)).isEmpty();
+        assertThat(rows(catalog.table("users").orElseThrow())).containsExactly(new Object[]{1, "bob", null});
+        assertThat(catalog.dropIndex("users_name", true)).isFalse();
+        assertThatThrownBy(() -> catalog.dropIndex("users_name", false))
+                .satisfies(e -> assertSqlState(e, SqlStates.UNDEFINED_OBJECT));
+    }
+
+    @Test
+    void dropTableRemovesIndexEntries() {
+        catalog.createTable("users", USERS, List.of("id"), false);
+        insert(catalog.table("users").orElseThrow(), new Object[]{1, "bob", null});
+        catalog.createIndex("users", "users_name", List.of("name"), false);
+        int tableId = catalog.table("users").orElseThrow().table().id();
+
+        catalog.dropTable("users", false);
+
+        assertThat(entries(tableId, 1)).isEmpty();
+        // Имя индекса освободилось вместе с таблицей.
+        catalog.createTable("users_name", USERS, List.of("id"), false);
+    }
+
+    @Test
+    void indexErrors() {
+        catalog.createTable("users", USERS, List.of("id"), false);
+        catalog.createIndex("users", "users_name", List.of("name"), false);
+
+        // Индексы и таблицы делят одно пространство имён.
+        assertThatThrownBy(() -> catalog.createIndex("users", "users_name", List.of("id"), false))
+                .satisfies(e -> assertSqlState(e, SqlStates.DUPLICATE_TABLE));
+        assertThatThrownBy(() -> catalog.createIndex("users", "users", List.of("id"), false))
+                .satisfies(e -> assertSqlState(e, SqlStates.DUPLICATE_TABLE));
+        assertThatThrownBy(() -> catalog.createTable("users_name", USERS, List.of("id"), false))
+                .satisfies(e -> assertSqlState(e, SqlStates.DUPLICATE_TABLE));
+        assertThat(catalog.createIndex("users", "users_name", List.of("id"), true)).isFalse();
+
+        assertThatThrownBy(() -> catalog.createIndex("nope", "i", List.of("id"), false))
+                .satisfies(e -> assertSqlState(e, SqlStates.UNDEFINED_TABLE));
+        assertThatThrownBy(() -> catalog.createIndex("users", "i", List.of("nope"), false))
+                .satisfies(e -> assertSqlState(e, SqlStates.UNDEFINED_COLUMN));
+        assertThatThrownBy(() -> catalog.createIndex("users", "i", List.of("balance"), false))
+                .satisfies(e -> assertSqlState(e, SqlStates.FEATURE_NOT_SUPPORTED));
+        assertThat(catalog.table("users").orElseThrow().table().indexes()).hasSize(1);
+    }
+
+    /** Записи индекса как пары {ключ, значение}. */
+    private List<Object[]> entries(int tableId, int indexId) {
+        List<Object[]> entries = new ArrayList<>();
+        try (KvIterator it = store.scan(Keys.indexPrefix(tableId, indexId))) {
+            while (it.next()) {
+                entries.add(new Object[]{it.key(), it.value()});
+            }
+        }
+        return entries;
     }
 
     /** Вставка в отдельной транзакции с COMMIT. */
