@@ -87,7 +87,7 @@ final class SwdbTable extends AbstractQueryableTable implements ModifiableTable,
      */
     @Override
     public Enumerable<Object[]> scan(DataContext root, List<RexNode> filters) {
-        KeyRange range = KeyConditions.extract(store.table(), filters, new RexBuilder(root.getTypeFactory()));
+        KeyRange range = KeyConditions.extract(store.table(), filters, new RexBuilder(root.getTypeFactory()), root);
         return new AbstractEnumerable<>() {
             @Override
             public Enumerator<Object[]> enumerator() {

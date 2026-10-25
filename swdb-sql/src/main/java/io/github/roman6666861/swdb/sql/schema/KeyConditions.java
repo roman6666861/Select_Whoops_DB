@@ -3,13 +3,16 @@ package io.github.roman6666861.swdb.sql.schema;
 import io.github.roman6666861.swdb.catalog.ColumnType;
 import io.github.roman6666861.swdb.catalog.KeyBound;
 import io.github.roman6666861.swdb.catalog.TableDef;
+import org.apache.calcite.DataContext;
 import org.apache.calcite.plan.RelOptUtil;
 import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.rex.RexCall;
+import org.apache.calcite.rex.RexDynamicParam;
 import org.apache.calcite.rex.RexInputRef;
 import org.apache.calcite.rex.RexLiteral;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.rex.RexUtil;
+import org.apache.calcite.runtime.SqlFunctions;
 import org.apache.calcite.sql.SqlKind;
 
 import java.util.ArrayList;
@@ -67,8 +70,9 @@ final class KeyConditions {
     /**
      * @param filters условия из WHERE; полностью выполненные диапазоном удаляются из списка
      * @param rex     нужен, чтобы раскрыть SEARCH (так Calcite записывает BETWEEN) в обычные сравнения
+     * @param root    значения параметров подготовленного оператора; {@code null} — параметры не используются
      */
-    static KeyRange extract(TableDef table, List<RexNode> filters, RexBuilder rex) {
+    static KeyRange extract(TableDef table, List<RexNode> filters, RexBuilder rex, DataContext root) {
         // AND(a, AND(b, c)) → [a, b, c]: так каждое условие можно взять или оставить по отдельности.
         List<RexNode> conditions = new ArrayList<>();
         for (RexNode filter : filters) {
@@ -80,13 +84,13 @@ final class KeyConditions {
         ColumnRange range = new ColumnRange(null, null);
         for (int column : table.primaryKey()) {
             ColumnType type = table.columns().get(column).type();
-            Optional<Object> equal = findEquality(conditions, column, type, rex, used);
+            Optional<Object> equal = findEquality(conditions, column, type, rex, root, used);
             if (equal.isPresent()) {
                 prefix.add(equal.get());
                 continue;
             }
             if (rangeKeepsOrder(type)) {
-                range = findRange(conditions, column, type, rex, used);
+                range = findRange(conditions, column, type, rex, root, used);
             }
             break; // дальше ключ упорядочен только внутри одного значения этой колонки
         }
@@ -102,9 +106,9 @@ final class KeyConditions {
     }
 
     private static Optional<Object> findEquality(List<RexNode> conditions, int column, ColumnType type,
-                                                 RexBuilder rex, List<RexNode> used) {
+                                                 RexBuilder rex, DataContext root, List<RexNode> used) {
         for (RexNode condition : conditions) {
-            Optional<ColumnRange> range = columnRange(condition, column, type, rex);
+            Optional<ColumnRange> range = columnRange(condition, column, type, rex, root);
             if (range.isPresent() && range.get().isPoint()) {
                 used.add(condition);
                 return Optional.of(range.get().lower().value());
@@ -115,10 +119,10 @@ final class KeyConditions {
 
     /** Собирает нижнюю и верхнюю границы из условий; условие, повторяющее уже взятую сторону, остаётся Calcite. */
     private static ColumnRange findRange(List<RexNode> conditions, int column, ColumnType type,
-                                         RexBuilder rex, List<RexNode> used) {
+                                         RexBuilder rex, DataContext root, List<RexNode> used) {
         ColumnRange result = new ColumnRange(null, null);
         for (RexNode condition : conditions) {
-            Optional<ColumnRange> range = columnRange(condition, column, type, rex);
+            Optional<ColumnRange> range = columnRange(condition, column, type, rex, root);
             if (range.isEmpty()) {
                 continue;
             }
@@ -157,14 +161,15 @@ final class KeyConditions {
     }
 
     /** Что условие говорит про колонку: сравнение с литералом или SEARCH, раскрытый в сравнения. */
-    private static Optional<ColumnRange> columnRange(RexNode condition, int column, ColumnType type, RexBuilder rex) {
+    private static Optional<ColumnRange> columnRange(RexNode condition, int column, ColumnType type, RexBuilder rex,
+                                                     DataContext root) {
         if (condition.getKind() != SqlKind.SEARCH) {
-            return comparison(condition, column, type);
+            return comparison(condition, column, type, root);
         }
         // SEARCH($0, Sarg[[2..6]]) → AND(>=($0, 2), <=($0, 6)); несколько диапазонов (IN) дают OR — не берём.
         ColumnRange result = new ColumnRange(null, null);
         for (RexNode part : RelOptUtil.conjunctions(RexUtil.expandSearch(rex, null, condition))) {
-            Optional<ColumnRange> range = comparison(part, column, type);
+            Optional<ColumnRange> range = comparison(part, column, type, root);
             if (range.isEmpty()) {
                 return Optional.empty();
             }
@@ -178,13 +183,14 @@ final class KeyConditions {
     }
 
     /**
-     * Сравнение вида {@code колонка <op> литерал} (или {@code литерал <op> колонка}).
+     * Сравнение вида {@code колонка <op> значение} (или {@code значение <op> колонка}), где значение —
+     * литерал или параметр подготовленного оператора ({@code WHERE id = ?}).
      * <p>
-     * Литерал должен быть того же SQL-типа, что и колонка. Calcite сам приводит литерал к типу
+     * Значение должно быть того же SQL-типа, что и колонка. Calcite сам приводит литерал к типу
      * колонки, если это возможно без потерь; иначе (например, {@code id = 5.5} для INT) он
      * оборачивает в CAST колонку, и такое условие мы не берём.
      */
-    private static Optional<ColumnRange> comparison(RexNode condition, int column, ColumnType type) {
+    private static Optional<ColumnRange> comparison(RexNode condition, int column, ColumnType type, DataContext root) {
         if (!(condition instanceof RexCall call) || call.getOperands().size() != 2) {
             return Optional.empty();
         }
@@ -199,11 +205,14 @@ final class KeyConditions {
             kind = kind.reverse();
         }
         if (!(left instanceof RexInputRef ref && ref.getIndex() == column
-                && right instanceof RexLiteral literal
-                && literal.getType().getSqlTypeName() == ref.getType().getSqlTypeName())) {
+                && right.getType().getSqlTypeName() == ref.getType().getSqlTypeName())) {
             return Optional.empty();
         }
-        Object value = literalValue(literal, type);
+        Object value = switch (right) {
+            case RexLiteral literal -> literalValue(literal, type);
+            case RexDynamicParam parameter -> parameterValue(parameter, type, root);
+            default -> null;
+        };
         if (value == null) {
             return Optional.empty();
         }
@@ -227,5 +236,42 @@ final class KeyConditions {
             case VARCHAR -> literal.getValueAs(String.class);
             case DECIMAL -> null; // DECIMAL не бывает в первичном ключе
         };
+    }
+
+    /**
+     * Значение параметра {@code ?n} для этого выполнения. Calcite кладёт его в {@link DataContext}
+     * под именем {@code "?n"} в Java-типе, который передали в {@code setObject}: для дат это может
+     * быть {@code java.sql.Date} или уже число. Перевод во внутреннее представление делается теми же
+     * функциями Calcite, что и в сгенерированном коде, — иначе ключ мог бы не совпасть со строкой.
+     * <p>
+     * {@code null} — значение не годится для ключа (NULL или неожиданный тип); тогда условие
+     * просто остаётся Calcite.
+     */
+    private static Object parameterValue(RexDynamicParam parameter, ColumnType type, DataContext root) {
+        Object value = root == null ? null : root.get(parameter.getName());
+        return switch (value) {
+            case null -> null;
+            case Boolean b when type == ColumnType.BOOLEAN -> b;
+            case Integer i when type == ColumnType.INTEGER || type == ColumnType.DATE -> i;
+            case Long l when type == ColumnType.BIGINT || type == ColumnType.TIMESTAMP -> l;
+            case Number n when type == ColumnType.INTEGER || type == ColumnType.BIGINT -> exactInteger(n, type);
+            case Double d when type == ColumnType.DOUBLE -> d;
+            case String s when type == ColumnType.VARCHAR -> s;
+            case java.sql.Date d when type == ColumnType.DATE -> SqlFunctions.toInt(d);
+            case java.sql.Timestamp t when type == ColumnType.TIMESTAMP -> SqlFunctions.toLong(t);
+            default -> null;
+        };
+    }
+
+    /** Целое того же типа, что колонка, или {@code null}, если значение в него не помещается. */
+    private static Object exactInteger(Number n, ColumnType type) {
+        if (n instanceof Float || n instanceof Double || n instanceof java.math.BigDecimal) {
+            return null;
+        }
+        long value = n.longValue();
+        if (type == ColumnType.BIGINT) {
+            return value;
+        }
+        return value == (int) value ? (Object) (int) value : null;
     }
 }

@@ -4,12 +4,16 @@ import io.github.roman6666861.swdb.catalog.ColumnDef;
 import io.github.roman6666861.swdb.catalog.ColumnType;
 import io.github.roman6666861.swdb.catalog.KeyBound;
 import io.github.roman6666861.swdb.catalog.TableDef;
+import org.apache.calcite.DataContext;
+import org.apache.calcite.adapter.java.JavaTypeFactory;
 import org.apache.calcite.jdbc.JavaTypeFactoryImpl;
+import org.apache.calcite.linq4j.QueryProvider;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.rex.RexLiteral;
 import org.apache.calcite.rex.RexNode;
+import org.apache.calcite.schema.SchemaPlus;
 import org.apache.calcite.sql.SqlOperator;
 import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.apache.calcite.sql.type.SqlTypeName;
@@ -17,7 +21,9 @@ import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import static org.apache.calcite.sql.fun.SqlStdOperatorTable.EQUALS;
 import static org.apache.calcite.sql.fun.SqlStdOperatorTable.GREATER_THAN;
@@ -215,8 +221,79 @@ class KeyConditionsTest {
         assertThat(extract(EVENTS, list(call(EQUALS, column(1), literal(5))))).isEqualTo(KeyRange.ALL);
     }
 
+    // ---- параметры подготовленного оператора ----
+
+    @Test
+    void parameterValueIsTakenFromDataContext() {
+        // WHERE id = ?0 AND v < 100, где ?0 = 5
+        RexNode vLess = call(LESS_THAN, column(1), literal(100));
+        List<RexNode> filters = list(call(EQUALS, column(0), parameter(0)), vLess);
+
+        assertThat(KeyConditions.extract(T, filters, rex, parameters(5))).isEqualTo(point(5));
+        assertThat(filters).as("условие с параметром выполнено ключом").containsExactly(vLess);
+    }
+
+    @Test
+    void parameterRangeAndComposite() {
+        List<RexNode> filters = list(call(EQUALS, column(0), parameter(0)), call(GREATER_THAN, parameter(1), column(1)));
+
+        // d = ?0 AND ?1 > seq, то есть seq < ?1
+        assertThat(KeyConditions.extract(EVENTS, filters, rex, parameters(10, 7)))
+                .isEqualTo(new KeyRange(KeyBound.inclusive(10), KeyBound.exclusive(10, 7)));
+        assertThat(filters).isEmpty();
+    }
+
+    @Test
+    void unusableParameterStaysForCalcite() {
+        // NULL: id = NULL не равно ничему — пусть это решит Calcite.
+        List<RexNode> withNull = list(call(EQUALS, column(0), parameter(0)));
+        assertThat(KeyConditions.extract(T, withNull, rex, parameters((Object) null))).isEqualTo(KeyRange.ALL);
+        assertThat(withNull).hasSize(1);
+
+        // Без DataContext (план, а не выполнение) значений нет.
+        List<RexNode> withoutContext = list(call(EQUALS, column(0), parameter(0)));
+        assertThat(KeyConditions.extract(T, withoutContext, rex, null)).isEqualTo(KeyRange.ALL);
+
+        // Значение не помещается в INT.
+        List<RexNode> tooBig = list(call(EQUALS, column(0), parameter(0)));
+        assertThat(KeyConditions.extract(T, tooBig, rex, parameters(3_000_000_000L))).isEqualTo(KeyRange.ALL);
+    }
+
+    private RexNode parameter(int index) {
+        return rex.makeDynamicParam(types.createSqlType(SqlTypeName.INTEGER), index);
+    }
+
+    /** DataContext выполнения: значения параметров под именами "?0", "?1", ... */
+    private DataContext parameters(Object... values) {
+        Map<String, Object> map = new HashMap<>();
+        for (int i = 0; i < values.length; i++) {
+            map.put("?" + i, values[i]);
+        }
+        return new DataContext() {
+            @Override
+            public SchemaPlus getRootSchema() {
+                return null;
+            }
+
+            @Override
+            public JavaTypeFactory getTypeFactory() {
+                return (JavaTypeFactory) types;
+            }
+
+            @Override
+            public QueryProvider getQueryProvider() {
+                return null;
+            }
+
+            @Override
+            public Object get(String name) {
+                return map.get(name);
+            }
+        };
+    }
+
     private KeyRange extract(TableDef table, List<RexNode> filters) {
-        return KeyConditions.extract(table, filters, rex);
+        return KeyConditions.extract(table, filters, rex, null);
     }
 
     private static KeyRange point(Object value) {

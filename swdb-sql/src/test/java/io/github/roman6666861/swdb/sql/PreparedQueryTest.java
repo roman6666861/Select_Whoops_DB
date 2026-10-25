@@ -136,6 +136,43 @@ class PreparedQueryTest {
         assertThat(rows(session.execute("SELECT COUNT(*) FROM t"))).containsExactly(List.of(2L));
     }
 
+    @Test
+    void primaryKeyLookupsWithParametersOfAllKeyTypes() {
+        session.execute("""
+                CREATE TABLE k (d DATE, ts TIMESTAMP, code VARCHAR(5), n BIGINT, note VARCHAR(10),
+                  PRIMARY KEY (d, ts, code, n))""");
+        session.execute("""
+                INSERT INTO k VALUES
+                  (DATE '2026-10-20', TIMESTAMP '2026-10-20 08:00:00', 'a', 1, 'one'),
+                  (DATE '2026-10-21', TIMESTAMP '2026-10-21 09:30:00', 'b', 2, 'two'),
+                  (DATE '2026-10-21', TIMESTAMP '2026-10-21 09:30:00', 'b', 3, 'three'),
+                  (DATE '2026-10-22', TIMESTAMP '2026-10-22 10:00:00', 'c', 4, 'four')""");
+
+        // Если значение параметра переведено в ключ неверно (например, дата сдвинута часовым поясом),
+        // ключ не совпадёт с записанным, и строка не найдётся.
+        try (PreparedQuery full = session.prepare("SELECT note FROM k WHERE d = $1 AND ts = $2 AND code = $3 AND n = $4")) {
+            assertThat(rows(full.execute(List.of(Date.valueOf("2026-10-21"),
+                    java.sql.Timestamp.valueOf("2026-10-21 09:30:00"), "b", 3L)))).containsExactly(List.of("three"));
+            assertThat(rows(full.execute(List.of(Date.valueOf("2026-10-21"),
+                    java.sql.Timestamp.valueOf("2026-10-21 09:30:01"), "b", 3L)))).isEmpty();
+        }
+        try (PreparedQuery prefix = session.prepare("SELECT note FROM k WHERE d = $1 ORDER BY n")) {
+            assertThat(rows(prefix.execute(List.of(Date.valueOf("2026-10-21")))))
+                    .containsExactly(List.of("two"), List.of("three"));
+        }
+        try (PreparedQuery range = session.prepare("SELECT note FROM k WHERE d >= $1 AND d < $2 ORDER BY n")) {
+            assertThat(rows(range.execute(List.of(Date.valueOf("2026-10-21"), Date.valueOf("2026-10-22")))))
+                    .containsExactly(List.of("two"), List.of("three"));
+        }
+        try (PreparedQuery byId = session.prepare("SELECT name FROM t WHERE id = $1 OR id = $2")) {
+            // OR ключом не берётся — Calcite проверяет сам; результат тот же.
+            assertThat(rows(byId.execute(List.of(1, 2)))).containsExactly(List.of("ann"), List.of("bob"));
+        }
+        try (PreparedQuery nullKey = session.prepare("SELECT name FROM t WHERE id = $1")) {
+            assertThat(rows(nullKey.execute(Arrays.asList((Object) null)))).isEmpty();
+        }
+    }
+
     private static List<List<Object>> rows(StatementResult result) {
         assertThat(result).isInstanceOf(StatementResult.Rows.class);
         return ((StatementResult.Rows) result).rows();
