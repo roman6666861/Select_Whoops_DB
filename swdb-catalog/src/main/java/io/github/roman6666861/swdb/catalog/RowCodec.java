@@ -79,17 +79,65 @@ final class RowCodec {
         }
         KeyBuilder key = Keys.data(table.id());
         for (int i = 0; i < values.size(); i++) {
-            Object value = values.get(i);
-            switch (table.columns().get(primaryKey.get(i)).type()) {
-                case BOOLEAN -> key.appendBoolean((Boolean) value);
-                case INTEGER, DATE -> key.appendInt(((Number) value).intValue());
-                case BIGINT, TIMESTAMP -> key.appendLong(((Number) value).longValue());
-                case DOUBLE -> key.appendDouble(((Number) value).doubleValue());
-                case VARCHAR -> key.appendString(value.toString());
-                case DECIMAL -> throw new IllegalStateException("DECIMAL is not allowed in primary key");
-            }
+            appendValue(key, table.columns().get(primaryKey.get(i)).type(), values.get(i));
         }
         return key.build();
+    }
+
+    /**
+     * Ключ записи индекса для строки: значения колонок индекса, затем первичный ключ.
+     * Строка должна быть уже {@link #normalize нормализована}.
+     */
+    byte[] encodeIndexKey(IndexDef index, Object[] row) {
+        KeyBuilder key = Keys.index(table.id(), index.id());
+        for (int column : index.columns()) {
+            appendNullable(key, table.columns().get(column).type(), row[column]);
+        }
+        for (int column : table.primaryKey()) {
+            appendValue(key, table.columns().get(column).type(), row[column]);
+        }
+        return key.build();
+    }
+
+    /**
+     * Префикс ключей индекса для значений первых его колонок: с него начинаются записи всех строк
+     * с такими значениями. Как и в {@link #encodeKeyPrefix}, числа приводятся к типу колонки.
+     */
+    byte[] encodeIndexPrefix(IndexDef index, List<Object> values) {
+        if (values.size() > index.columns().size()) {
+            throw new IllegalArgumentException("index " + index.name() + " has " + index.columns().size()
+                    + " columns, got " + values.size() + " values");
+        }
+        KeyBuilder key = Keys.index(table.id(), index.id());
+        for (int i = 0; i < values.size(); i++) {
+            appendNullable(key, table.columns().get(index.columns().get(i)).type(), values.get(i));
+        }
+        return key.build();
+    }
+
+    /**
+     * Колонка индекса может быть NULL, поэтому перед значением — байт-флаг: {@code 00} — NULL,
+     * {@code 01} — значение. Так NULL-ы лежат в начале индекса и не смешиваются со значениями.
+     */
+    private static void appendNullable(KeyBuilder key, ColumnType type, Object value) {
+        if (value == null) {
+            key.appendByte(0);
+        } else {
+            key.appendByte(1);
+            appendValue(key, type, value);
+        }
+    }
+
+    /** Значение колонки в упорядоченном кодировании: порядок байтов совпадает с порядком значений. */
+    private static void appendValue(KeyBuilder key, ColumnType type, Object value) {
+        switch (type) {
+            case BOOLEAN -> key.appendBoolean((Boolean) value);
+            case INTEGER, DATE -> key.appendInt(((Number) value).intValue());
+            case BIGINT, TIMESTAMP -> key.appendLong(((Number) value).longValue());
+            case DOUBLE -> key.appendDouble(((Number) value).doubleValue());
+            case VARCHAR -> key.appendString(value.toString());
+            case DECIMAL -> throw new IllegalStateException("DECIMAL has no ordered key encoding");
+        }
     }
 
     byte[] encodeValue(Object[] row) {
