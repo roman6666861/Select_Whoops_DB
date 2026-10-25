@@ -74,6 +74,42 @@ record PgType(int oid, short size) {
     }
 
     /**
+     * Приводит значение, раскодированное по типу клиента, к Java-типу параметра Calcite.
+     * Клиент может прислать {@code int4}, а Calcite ждать BIGINT, или {@code float8} для DECIMAL.
+     */
+    static Object toParameter(Object value, int jdbcType) {
+        try {
+            return switch (jdbcType) {
+                case Types.TINYINT, Types.SMALLINT, Types.INTEGER -> value instanceof Number n
+                        ? Integer.valueOf(Math.toIntExact(exactLong(n))) : fromText(value.toString(), jdbcType);
+                case Types.BIGINT -> value instanceof Number n ? Long.valueOf(exactLong(n)) : fromText(value.toString(), jdbcType);
+                case Types.REAL, Types.FLOAT, Types.DOUBLE -> value instanceof Number n
+                        ? Double.valueOf(n.doubleValue()) : fromText(value.toString(), jdbcType);
+                case Types.DECIMAL, Types.NUMERIC -> value instanceof Number n
+                        ? new BigDecimal(n.toString()) : fromText(value.toString(), jdbcType);
+                case Types.BOOLEAN, Types.BIT -> value instanceof Boolean ? value : fromText(value.toString(), jdbcType);
+                case Types.DATE -> value instanceof java.sql.Timestamp ts ? java.sql.Date.valueOf(ts.toLocalDateTime().toLocalDate())
+                        : value instanceof java.sql.Date ? value : fromText(value.toString(), jdbcType);
+                case Types.TIMESTAMP -> value instanceof java.sql.Date d ? java.sql.Timestamp.valueOf(d.toLocalDate().atStartOfDay())
+                        : value instanceof java.sql.Timestamp ? value : fromText(value.toString(), jdbcType);
+                case Types.CHAR, Types.VARCHAR, Types.LONGVARCHAR -> value instanceof byte[] ? value : value.toString();
+                default -> value;
+            };
+        } catch (ArithmeticException e) {
+            throw new SwdbException(SqlStates.NUMERIC_VALUE_OUT_OF_RANGE, "value " + value + " is out of range for type "
+                    + name(jdbcType), e);
+        }
+    }
+
+    /** Целое значение числа; 2.5 в целочисленный параметр не превращается молча в 2. */
+    private static long exactLong(Number n) {
+        return switch (n) {
+            case Byte _, Short _, Integer _, Long _ -> n.longValue();
+            default -> new BigDecimal(n.toString()).longValueExact();
+        };
+    }
+
+    /**
      * JDBC-драйвер передаёт дату и время с часовым поясом клиента: {@code 2026-01-02 03:04:05+03}.
      * Наш TIMESTAMP — без часового пояса, и PostgreSQL для такого типа указание пояса просто
      * отбрасывает; так же поступаем мы.

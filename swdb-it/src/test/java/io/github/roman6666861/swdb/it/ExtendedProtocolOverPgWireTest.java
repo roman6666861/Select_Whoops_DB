@@ -40,9 +40,7 @@ class ExtendedProtocolOverPgWireTest {
     @BeforeEach
     void start() throws Exception {
         server = SwdbServer.start(new ServerConfig("127.0.0.1", 0, dataDir));
-        // Двоичный формат значений пока не поддерживается.
-        c = DriverManager.getConnection(
-                "jdbc:postgresql://127.0.0.1:" + server.port() + "/swdb?binaryTransfer=false", "swdb", "");
+        c = connect(""); // настройки драйвера по умолчанию: setInt и подобные идут в двоичном формате
         try (Statement s = c.createStatement()) {
             s.executeUpdate("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR(20), price DECIMAL(10, 2), "
                     + "big BIGINT, ok BOOLEAN, d DATE, ts TIMESTAMP)");
@@ -85,6 +83,28 @@ class ExtendedProtocolOverPgWireTest {
 
     @Test
     void parameterAndColumnTypes() throws Exception {
+        insertAndReadAllTypes(c);
+    }
+
+    @Test
+    void binaryParametersAndColumns() throws Exception {
+        // prepareThreshold=-1: сразу именованный оператор на сервере, и драйвер просит колонки
+        // результата в двоичном формате; binaryTransfer=false у второго подключения — для сравнения.
+        try (Connection binary = connect("?prepareThreshold=-1"); Connection text = connect("?binaryTransfer=false")) {
+            insertAndReadAllTypes(binary);
+            try (PreparedStatement select = text.prepareStatement("SELECT price, d FROM t WHERE id = ?")) {
+                select.setInt(1, 1);
+                try (ResultSet rs = select.executeQuery()) {
+                    assertThat(rs.next()).isTrue();
+                    assertThat(rs.getBigDecimal(1)).isEqualTo(new BigDecimal("12.50"));
+                    assertThat(rs.getDate(2)).isEqualTo(Date.valueOf("2026-10-21"));
+                }
+            }
+        }
+    }
+
+    /** Все типы туда и обратно: параметры в INSERT и WHERE, значения колонок. */
+    private static void insertAndReadAllTypes(Connection c) throws SQLException {
         try (PreparedStatement insert = c.prepareStatement("INSERT INTO t VALUES (?, ?, ?, ?, ?, ?, ?)")) {
             insert.setInt(1, 1);
             insert.setString(2, "ann");
@@ -122,6 +142,10 @@ class ExtendedProtocolOverPgWireTest {
                 assertThat(rs.getObject("price")).isNull();
             }
         }
+    }
+
+    private Connection connect(String options) throws SQLException {
+        return DriverManager.getConnection("jdbc:postgresql://127.0.0.1:" + server.port() + "/swdb" + options, "swdb", "");
     }
 
     @Test

@@ -31,13 +31,21 @@ import java.util.Map;
 final class ExtendedProtocol {
 
     private static final int TEXT = 0;
+    private static final int BINARY = 1;
 
     private final SqlSession session;
-    private final Map<String, PreparedQuery> statements = new HashMap<>();
+    private final Map<String, Statement> statements = new HashMap<>();
     private final Map<String, Portal> portals = new HashMap<>();
 
     ExtendedProtocol(SqlSession session) {
         this.session = session;
+    }
+
+    /**
+     * Подготовленный оператор и OID типов его параметров: какие указал клиент в Parse,
+     * а где он прислал 0 — выведенные Calcite. По этим OID читаются двоичные значения в Bind.
+     */
+    private record Statement(PreparedQuery query, List<Integer> parameterOids) {
     }
 
     /** Портал: оператор, значения параметров и, после первого Execute, результат с позицией чтения. */
@@ -46,13 +54,16 @@ final class ExtendedProtocol {
         final String statement;
         final PreparedQuery query;
         final List<Object> parameters;
+        /** Для каждой колонки — в двоичном ли формате её просил клиент. */
+        final List<Boolean> binaryColumns;
         StatementResult result;
         int sentRows;
 
-        Portal(String statement, PreparedQuery query, List<Object> parameters) {
+        Portal(String statement, PreparedQuery query, List<Object> parameters, List<Boolean> binaryColumns) {
             this.statement = statement;
             this.query = query;
             this.parameters = parameters;
+            this.binaryColumns = binaryColumns;
         }
     }
 
@@ -63,8 +74,14 @@ final class ExtendedProtocol {
                     "prepared statement \"" + name + "\" already exists");
         }
         PreparedQuery query = session.prepare(parse.sql());
+        List<Integer> types = query.parameterTypes();
+        List<Integer> oids = new ArrayList<>(types.size());
+        for (int i = 0; i < types.size(); i++) {
+            Integer clientOid = i < parse.parameterTypes().size() ? parse.parameterTypes().get(i) : 0;
+            oids.add(clientOid != 0 ? clientOid : PgType.of(types.get(i)).oid());
+        }
         closeStatement(name);
-        statements.put(name, query);
+        statements.put(name, new Statement(query, List.copyOf(oids)));
         w.parseComplete();
     }
 
@@ -73,8 +90,8 @@ final class ExtendedProtocol {
         if (!name.isEmpty() && portals.containsKey(name)) {
             throw new SwdbException(SqlStates.DUPLICATE_CURSOR, "cursor \"" + name + "\" already exists");
         }
-        PreparedQuery query = statement(bind.statement());
-        List<Integer> types = query.parameterTypes();
+        Statement statement = statement(bind.statement());
+        List<Integer> types = statement.query().parameterTypes();
         if (bind.parameters().size() != types.size()) {
             throw new SwdbException(SqlStates.PROTOCOL_VIOLATION, "bind message supplies " + bind.parameters().size()
                     + " parameters, but prepared statement \"" + bind.statement() + "\" requires " + types.size());
@@ -82,34 +99,41 @@ final class ExtendedProtocol {
         List<Object> values = new ArrayList<>(types.size());
         for (int i = 0; i < types.size(); i++) {
             byte[] value = bind.parameters().get(i);
-            if (format(bind.parameterFormats(), i, types.size()) != TEXT) {
-                throw new SwdbException(SqlStates.FEATURE_NOT_SUPPORTED, "binary parameter format is not supported yet");
+            if (value == null) {
+                values.add(null);
+            } else if (format(bind.parameterFormats(), i, types.size()) == BINARY) {
+                // Байты читаются по типу клиента, затем значение приводится к типу параметра Calcite.
+                values.add(PgType.toParameter(PgBinary.decode(value, statement.parameterOids().get(i)), types.get(i)));
+            } else {
+                values.add(PgType.fromText(new String(value, StandardCharsets.UTF_8), types.get(i)));
             }
-            values.add(value == null ? null : PgType.fromText(new String(value, StandardCharsets.UTF_8), types.get(i)));
         }
-        int columns = query.columns().size();
+        int columns = statement.query().columns().size();
+        List<Boolean> binaryColumns = new ArrayList<>(columns);
         for (int i = 0; i < columns; i++) {
-            if (format(bind.resultFormats(), i, columns) != TEXT) {
-                throw new SwdbException(SqlStates.FEATURE_NOT_SUPPORTED, "binary result format is not supported yet");
-            }
+            binaryColumns.add(format(bind.resultFormats(), i, columns) == BINARY);
         }
-        portals.put(name, new Portal(bind.statement(), query, values));
+        portals.put(name, new Portal(bind.statement(), statement.query(), values, List.copyOf(binaryColumns)));
         w.bindComplete();
     }
 
     void describe(FrontendMessage.Describe describe, PgMessageWriter w) {
-        List<Column> columns;
         if (describe.target() == FrontendMessage.Target.STATEMENT) {
-            PreparedQuery query = statement(describe.name());
-            w.parameterDescription(query.parameterTypes().stream().map(type -> PgType.of(type).oid()).toList());
-            columns = query.columns();
+            Statement statement = statement(describe.name());
+            w.parameterDescription(statement.parameterOids());
+            // Форматы колонок станут известны только в Bind, поэтому здесь они текстовые, как в PostgreSQL.
+            describeColumns(statement.query().columns(), List.of(), w);
         } else {
-            columns = portal(describe.name()).query.columns();
+            Portal portal = portal(describe.name());
+            describeColumns(portal.query.columns(), portal.binaryColumns, w);
         }
+    }
+
+    private static void describeColumns(List<Column> columns, List<Boolean> binary, PgMessageWriter w) {
         if (columns.isEmpty()) {
             w.noData();
         } else {
-            w.rowDescription(columns);
+            w.rowDescription(columns, binary);
         }
     }
 
@@ -124,7 +148,7 @@ final class ExtendedProtocol {
                 int total = rows.rows().size();
                 int end = execute.maxRows() > 0 ? Math.min(total, portal.sentRows + execute.maxRows()) : total;
                 for (List<Object> row : rows.rows().subList(portal.sentRows, end)) {
-                    w.dataRow(row);
+                    w.dataRow(row, rows.columns(), portal.binaryColumns);
                 }
                 int sent = end - portal.sentRows;
                 portal.sentRows = end;
@@ -167,24 +191,24 @@ final class ExtendedProtocol {
 
     /** Закрывает оператор и порталы, созданные из него. */
     private void closeStatement(String name) {
-        PreparedQuery query = statements.remove(name);
-        if (query != null) {
+        Statement statement = statements.remove(name);
+        if (statement != null) {
             for (Iterator<Portal> it = portals.values().iterator(); it.hasNext(); ) {
                 if (it.next().statement.equals(name)) {
                     it.remove();
                 }
             }
-            query.close();
+            statement.query().close();
         }
     }
 
-    private PreparedQuery statement(String name) {
-        PreparedQuery query = statements.get(name);
-        if (query == null) {
+    private Statement statement(String name) {
+        Statement statement = statements.get(name);
+        if (statement == null) {
             throw new SwdbException(SqlStates.INVALID_SQL_STATEMENT_NAME,
                     "prepared statement \"" + name + "\" does not exist");
         }
-        return query;
+        return statement;
     }
 
     private Portal portal(String name) {

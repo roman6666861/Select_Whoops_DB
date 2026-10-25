@@ -52,36 +52,57 @@ final class PgMessageWriter {
         return end();
     }
 
+    /** Все колонки в текстовом формате. */
     PgMessageWriter rowDescription(List<Column> columns) {
+        return rowDescription(columns, List.of());
+    }
+
+    /** @param binary для каждой колонки — в двоичном ли она формате; пустой список — все текстовые */
+    PgMessageWriter rowDescription(List<Column> columns, List<Boolean> binary) {
         begin('T');
         buf.writeShort(columns.size());
-        for (Column column : columns) {
-            PgType type = PgType.of(column.jdbcType());
-            cstring(column.name());
+        for (int i = 0; i < columns.size(); i++) {
+            PgType type = PgType.of(columns.get(i).jdbcType());
+            cstring(columns.get(i).name());
             buf.writeInt(0);             // OID таблицы
             buf.writeShort(0);           // номер колонки в таблице
             buf.writeInt(type.oid());
             buf.writeShort(type.size());
             buf.writeInt(-1);            // type modifier
-            buf.writeShort(0);           // формат: текст
+            buf.writeShort(isBinary(binary, i) ? 1 : 0);
         }
         return end();
     }
 
+    /** Все значения в текстовом формате. */
     PgMessageWriter dataRow(List<Object> values) {
+        return dataRow(values, List.of(), List.of());
+    }
+
+    /**
+     * @param columns колонки — по их типу выбирается двоичное представление
+     * @param binary  для каждой колонки — в двоичном ли она формате; пустой список — все текстовые
+     */
+    PgMessageWriter dataRow(List<Object> values, List<Column> columns, List<Boolean> binary) {
         begin('D');
         buf.writeShort(values.size());
-        for (Object value : values) {
-            String text = PgType.toText(value);
-            if (text == null) {
+        for (int i = 0; i < values.size(); i++) {
+            Object value = values.get(i);
+            if (value == null) {
                 buf.writeInt(-1);
-            } else {
-                byte[] bytes = text.getBytes(UTF_8);
-                buf.writeInt(bytes.length);
-                buf.writeBytes(bytes);
+                continue;
             }
+            byte[] bytes = isBinary(binary, i)
+                    ? PgBinary.encode(value, PgType.of(columns.get(i).jdbcType()).oid())
+                    : PgType.toText(value).getBytes(UTF_8);
+            buf.writeInt(bytes.length);
+            buf.writeBytes(bytes);
         }
         return end();
+    }
+
+    private static boolean isBinary(List<Boolean> binary, int column) {
+        return !binary.isEmpty() && binary.get(column);
     }
 
     PgMessageWriter commandComplete(String tag) {
