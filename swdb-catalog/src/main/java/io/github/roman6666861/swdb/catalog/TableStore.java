@@ -20,6 +20,9 @@ import java.util.Set;
  * после её COMMIT, а при ROLLBACK исчезают все вместе. Ключи, которые операция проверяет или
  * меняет, блокируются до конца транзакции ({@link KvTransaction#getForUpdate}), поэтому две
  * транзакции не могут одновременно вставить строку с одним первичным ключом.
+ * <p>
+ * Записи вторичных индексов меняются в той же транзакции, что и строки: индекс никогда не
+ * расходится с таблицей, даже после ROLLBACK.
  */
 public final class TableStore {
 
@@ -42,15 +45,27 @@ public final class TableStore {
             throw duplicateKey();
         }
         tx.put(key, codec.encodeValue(normalized));
+        for (IndexDef index : table.indexes()) {
+            tx.put(codec.encodeIndexKey(index, normalized), key);
+        }
     }
 
-    /** Удаляет строку с тем же первичным ключом; {@code false}, если такой строки нет. */
+    /**
+     * Удаляет строку с тем же первичным ключом; {@code false}, если такой строки нет.
+     * Записи индексов ищутся по строке, прочитанной из хранилища, а не по {@code row}:
+     * от {@code row} здесь нужен только первичный ключ.
+     */
     public boolean delete(KvTransaction tx, Object[] row) {
         byte[] key = codec.encodeKey(codec.normalize(row));
-        if (tx.getForUpdate(key) == null) {
+        byte[] stored = tx.getForUpdate(key);
+        if (stored == null) {
             return false;
         }
         tx.delete(key);
+        Object[] old = codec.decodeValue(stored);
+        for (IndexDef index : table.indexes()) {
+            tx.delete(codec.encodeIndexKey(index, old));
+        }
         return true;
     }
 
@@ -66,11 +81,14 @@ public final class TableStore {
      * Уникальность проверяется для итогового состояния, поэтому {@code id = id + 1} проходит,
      * хотя новый ключ одной строки совпадает со старым ключом другой. Строка, которой уже нет,
      * пропускается.
+     * <p>
+     * Запись индекса меняется, только если изменился её ключ: значение индексируемой колонки
+     * или первичный ключ. Старые записи, как и в {@link #delete}, вычисляются по строке из хранилища.
      *
      * @return число заменённых строк
      */
     public long update(KvTransaction tx, List<Change> changes) {
-        record Prepared(byte[] oldKey, byte[] newKey, byte[] value) {
+        record Prepared(byte[] oldKey, Object[] before, byte[] newKey, Object[] after, byte[] value) {
             boolean moves() {
                 return !Arrays.equals(oldKey, newKey);
             }
@@ -78,10 +96,13 @@ public final class TableStore {
         List<Prepared> prepared = new ArrayList<>(changes.size());
         for (Change change : changes) {
             Object[] after = codec.normalize(change.after());
-            prepared.add(new Prepared(codec.encodeKey(codec.normalize(change.before())),
-                    codec.encodeKey(after), codec.encodeValue(after)));
+            byte[] oldKey = codec.encodeKey(codec.normalize(change.before()));
+            byte[] stored = tx.getForUpdate(oldKey);
+            if (stored != null) {
+                prepared.add(new Prepared(oldKey, codec.decodeValue(stored),
+                        codec.encodeKey(after), after, codec.encodeValue(after)));
+            }
         }
-        prepared.removeIf(p -> tx.getForUpdate(p.oldKey()) == null);
         // ByteBuffer сравнивается по содержимому, поэтому годится как ключ множества.
         Set<ByteBuffer> freed = new HashSet<>();
         for (Prepared p : prepared) {
@@ -100,6 +121,23 @@ public final class TableStore {
         // Сначала все удаления, потом все записи: строка может занять ключ, освобождённый другой.
         prepared.stream().filter(Prepared::moves).forEach(p -> tx.delete(p.oldKey()));
         prepared.forEach(p -> tx.put(p.newKey(), p.value()));
+
+        // С записями индексов так же: если две строки обмениваются первичными ключами при одинаковом
+        // значении колонки, новая запись одной совпадает со старой записью другой.
+        List<byte[]> stale = new ArrayList<>();
+        List<byte[][]> fresh = new ArrayList<>();
+        for (Prepared p : prepared) {
+            for (IndexDef index : table.indexes()) {
+                byte[] oldEntry = codec.encodeIndexKey(index, p.before());
+                byte[] newEntry = codec.encodeIndexKey(index, p.after());
+                if (!Arrays.equals(oldEntry, newEntry)) {
+                    stale.add(oldEntry);
+                    fresh.add(new byte[][]{newEntry, p.newKey()});
+                }
+            }
+        }
+        stale.forEach(tx::delete);
+        fresh.forEach(entry -> tx.put(entry[0], entry[1]));
         return prepared.size();
     }
 

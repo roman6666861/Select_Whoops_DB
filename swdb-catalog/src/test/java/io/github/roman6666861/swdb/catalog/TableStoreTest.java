@@ -2,6 +2,8 @@ package io.github.roman6666861.swdb.catalog;
 
 import io.github.roman6666861.swdb.common.SqlStates;
 import io.github.roman6666861.swdb.common.SwdbException;
+import io.github.roman6666861.swdb.storage.KeyBuilder;
+import io.github.roman6666861.swdb.storage.KvIterator;
 import io.github.roman6666861.swdb.storage.KvStore;
 import io.github.roman6666861.swdb.storage.KvTransaction;
 import org.junit.jupiter.api.AfterEach;
@@ -12,6 +14,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -221,6 +224,87 @@ class TableStoreTest {
         assertThat(t.update(tx, List.of(change(1, "v1", 1, "x"), change(2, "v2", 2, "y")))).isEqualTo(1);
 
         assertThat(rows(t.scan(tx))).containsExactly(List.of(2, "y"));
+    }
+
+    @Test
+    void insertAndDeleteMaintainIndexes() {
+        TableStore t = indexedTable();
+        t.insert(tx, new Object[]{1, "b"});
+        t.insert(tx, new Object[]{2, "a"});
+        t.insert(tx, new Object[]{3, null});
+        assertIndexesMatchRows(t, 3);
+
+        assertThat(t.delete(tx, new Object[]{2, "ignored"})).isTrue(); // старые значения читаются из хранилища
+        assertIndexesMatchRows(t, 2);
+    }
+
+    @Test
+    void updateMaintainsIndexes() {
+        TableStore t = indexedTable();
+        for (int id = 1; id <= 4; id++) {
+            t.insert(tx, new Object[]{id, "same"});
+        }
+
+        t.update(tx, List.of(change(1, "same", 1, "x")));                         // значение колонки
+        t.update(tx, List.of(change(2, "same", 2, null)));                        // в NULL
+        t.update(tx, List.of(change(3, "same", 4, "same"), change(4, "same", 3, "same"))); // обмен ключами
+        assertIndexesMatchRows(t, 4);
+
+        // Как UPDATE t SET id = id + 1.
+        t.update(tx, List.of(change(1, "x", 2, "x"), change(2, null, 3, null),
+                change(3, "same", 4, "same"), change(4, "same", 5, "same")));
+        assertIndexesMatchRows(t, 4);
+    }
+
+    @Test
+    void rollbackLeavesNoIndexEntries() {
+        TableStore t = indexedTable();
+        t.insert(tx, new Object[]{1, "a"});
+        tx.commit();
+        try (KvTransaction change = catalog.begin()) {
+            t.insert(change, new Object[]{2, "b"});
+            t.update(change, List.of(change(1, "a", 1, "c")));
+            change.rollback();
+        }
+
+        tx.close();
+        tx = catalog.begin();
+        assertIndexesMatchRows(t, 1);
+        assertThat(rows(t.scan(tx))).containsExactly(List.of(1, "a"));
+    }
+
+    /** Таблица {@code t(id, v)} с индексами по {@code (v)} и {@code (v, id)}, без строк. */
+    private TableStore indexedTable() {
+        intTable();
+        catalog.createIndex("t", "t_v", List.of("v"), false);
+        catalog.createIndex("t", "t_v_id", List.of("v", "id"), false);
+        return catalog.table("t").orElseThrow();
+    }
+
+    /** В каждом индексе ровно те записи, которые построил бы по строкам таблицы {@code createIndex}. */
+    private void assertIndexesMatchRows(TableStore t, int rowCount) {
+        TableDef table = t.table();
+        RowCodec codec = new RowCodec(table);
+        HexFormat hex = HexFormat.of();
+        for (IndexDef index : table.indexes()) {
+            List<String> expected = new ArrayList<>();
+            try (RowCursor cursor = t.scan(tx)) {
+                while (cursor.next()) {
+                    expected.add(hex.formatHex(codec.encodeIndexKey(index, cursor.row()))
+                            + " -> " + hex.formatHex(codec.encodeKey(cursor.row())));
+                }
+            }
+            // Шестнадцатеричные строки сортируются так же, как байты в RocksDB.
+            expected.sort(null);
+            List<String> actual = new ArrayList<>();
+            byte[] prefix = Keys.indexPrefix(table.id(), index.id());
+            try (KvIterator it = tx.scan(prefix, KeyBuilder.prefixEnd(prefix))) {
+                while (it.next()) {
+                    actual.add(hex.formatHex(it.key()) + " -> " + hex.formatHex(it.value()));
+                }
+            }
+            assertThat(actual).as(index.name()).hasSize(rowCount).containsExactlyElementsOf(expected);
+        }
     }
 
     private static TableStore.Change change(int oldId, String oldV, int newId, String newV) {
