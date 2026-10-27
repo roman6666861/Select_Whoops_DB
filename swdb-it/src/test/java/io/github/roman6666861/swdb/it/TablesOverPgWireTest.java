@@ -66,6 +66,25 @@ class TablesOverPgWireTest {
         }
     }
 
+    @Test
+    void createAndDropIndex() throws Exception {
+        try (SwdbServer server = start(); Connection c = connect(server); Statement s = c.createStatement()) {
+            s.executeUpdate("CREATE TABLE users (id INT PRIMARY KEY, email VARCHAR(20))");
+            s.executeUpdate("INSERT INTO users VALUES (1, 'ann@x'), (2, 'bob@x')");
+
+            assertThat(s.executeUpdate("CREATE INDEX users_email ON users (email)")).isZero();
+            assertSqlState(() -> s.executeUpdate("CREATE INDEX users_email ON users (id)"), "42P07");
+            assertThat(s.executeUpdate("UPDATE users SET email = 'carol@x' WHERE id = 2")).isEqualTo(1);
+        }
+        try (SwdbServer server = start(); Connection c = connect(server); Statement s = c.createStatement()) {
+            // Индекс сохранился вместе с описанием таблицы.
+            assertSqlState(() -> s.executeUpdate("CREATE INDEX users_email ON users (id)"), "42P07");
+            assertThat(s.executeUpdate("DROP INDEX users_email")).isZero();
+            assertSqlState(() -> s.executeUpdate("DROP INDEX users_email"), "42704");
+            assertThat(names(s, "SELECT email FROM users")).containsExactly("ann@x", "carol@x");
+        }
+    }
+
     private SwdbServer start() throws InterruptedException {
         return SwdbServer.start(new ServerConfig("127.0.0.1", 0, dataDir));
     }

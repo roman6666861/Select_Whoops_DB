@@ -30,6 +30,7 @@ CREATE TABLE employees (
   hired DATE,
   PRIMARY KEY (id)
 );
+CREATE INDEX employees_hired ON employees (hired);
 INSERT INTO employees VALUES (1, 'Alice', 4800.50, DATE '2022-07-15');
 SELECT name, salary FROM employees WHERE salary > 4000 ORDER BY salary DESC;
 EXPLAIN SELECT name FROM employees WHERE id = 1;
@@ -43,10 +44,11 @@ DROP TABLE IF EXISTS employees;
 - `EXPLAIN <запрос>` (как в PostgreSQL) и `EXPLAIN PLAN FOR <запрос>` (как в Calcite) — план без выполнения;
 - типы: `BOOLEAN`, `INT`, `BIGINT`, `DOUBLE`, `DECIMAL(p, s)`, `VARCHAR(n)`/`TEXT`, `DATE`, `TIMESTAMP`;
 - `PRIMARY KEY` (обязателен; составной — `PRIMARY KEY (a, b)`, из одной колонки можно и `id INT PRIMARY KEY`), `NOT NULL`; данные хранятся в RocksDB и переживают перезапуск.
+- вторичные индексы: `CREATE INDEX [[IF NOT EXISTS] имя] ON таблица (колонки)`, `DROP INDEX [IF EXISTS] имя`; индекс обновляется в той же транзакции, что и строки, но запросы его пока не используют;
 - транзакции: `BEGIN` / `START TRANSACTION`, `COMMIT`, `ROLLBACK`; уровень изоляции REPEATABLE READ (снимок на начало транзакции, конфликт одновременной записи строки — ошибка `40001`); без `BEGIN` каждый оператор выполняется в своей транзакции; DDL внутри транзакции пока нельзя.
 
 Пока не поддерживаются: `MERGE`,
-`DEFAULT`, `UNIQUE`, вторичные индексы, уровни изоляции READ COMMITTED и SERIALIZABLE, `SAVEPOINT`, пользователи и пароли.
+`DEFAULT`, `UNIQUE` (в том числе `CREATE UNIQUE INDEX`), поиск по вторичным индексам, уровни изоляции READ COMMITTED и SERIALIZABLE, `SAVEPOINT`, пользователи и пароли.
 
 ## Модули
 

@@ -19,7 +19,8 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Выполняет DDL: переводит разобранные Calcite операторы CREATE/DROP TABLE в операции каталога.
+ * Выполняет DDL: переводит разобранные Calcite операторы CREATE/DROP TABLE и наши
+ * {@link IndexCommand} в операции каталога.
  */
 final class DdlExecutor {
 
@@ -68,6 +69,30 @@ final class DdlExecutor {
     StatementResult dropTable(SqlDropTable drop) {
         catalog.dropTable(tableName(drop.name), drop.ifExists);
         return new StatementResult.Update("DROP TABLE", 0);
+    }
+
+    StatementResult createIndex(IndexCommand.Create create) {
+        if (create.unique()) {
+            throw unsupported("CREATE UNIQUE INDEX");
+        }
+        String name = create.name() != null ? create.name() : defaultIndexName(create.table(), create.columns());
+        catalog.createIndex(create.table(), name, create.columns(), create.ifNotExists());
+        return new StatementResult.Update("CREATE INDEX", 0);
+    }
+
+    StatementResult dropIndex(IndexCommand.Drop drop) {
+        catalog.dropIndex(drop.name(), drop.ifExists());
+        return new StatementResult.Update("DROP INDEX", 0);
+    }
+
+    /** Как в PostgreSQL: {@code users_email_idx}, а если имя занято — {@code users_email_idx1} и дальше. */
+    private String defaultIndexName(String table, List<String> columns) {
+        String base = table + "_" + String.join("_", columns) + "_idx";
+        String name = base;
+        for (int i = 1; catalog.relationExists(name); i++) {
+            name = base + i;
+        }
+        return name;
     }
 
     /** {@code users} или {@code public.users}; другие схемы пока не поддерживаются. */

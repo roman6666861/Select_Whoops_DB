@@ -88,6 +88,9 @@ public final class SqlSession implements AutoCloseable {
     }
 
     private PreparedQuery prepareStatement(String text) {
+        if (IndexCommand.parse(text).isPresent()) {
+            return new DeferredQuery(text, List.of());
+        }
         Placeholders placeholders = Placeholders.of(text);
         SqlNode node = parse(placeholders.sql());
         if (node instanceof SqlSetOption || node instanceof SqlExplain || node instanceof SqlCreate
@@ -113,6 +116,13 @@ public final class SqlSession implements AutoCloseable {
     }
 
     private StatementResult executeStatement(String text) {
+        Optional<IndexCommand> index = IndexCommand.parse(text);
+        if (index.isPresent()) {
+            return switch (index.get()) {
+                case IndexCommand.Create create -> ddl.createIndex(outsideTransaction(create, "CREATE INDEX"));
+                case IndexCommand.Drop drop -> ddl.dropIndex(outsideTransaction(drop, "DROP INDEX"));
+            };
+        }
         // SET и DDL Calcite JDBC не выполняет: их обрабатываем сами, остальное отдаём Calcite.
         return switch (parse(text)) {
             case SqlSetOption set -> applySetting(set);
@@ -132,8 +142,12 @@ public final class SqlSession implements AutoCloseable {
      * иначе ROLLBACK не отменил бы CREATE TABLE.
      */
     private <T extends SqlNode> T outsideTransaction(T ddlStatement) {
+        return outsideTransaction(ddlStatement, ddlStatement.getKind().sql.replace('_', ' '));
+    }
+
+    private <T> T outsideTransaction(T ddlStatement, String name) {
         if (transactions.isOpen()) {
-            throw unsupported(ddlStatement.getKind().sql.replace('_', ' ') + " inside a transaction block");
+            throw unsupported(name + " inside a transaction block");
         }
         return ddlStatement;
     }

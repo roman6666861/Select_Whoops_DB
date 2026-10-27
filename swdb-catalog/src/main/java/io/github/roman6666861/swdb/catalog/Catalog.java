@@ -188,7 +188,8 @@ public final class Catalog {
         throw new SwdbException(SqlStates.UNDEFINED_OBJECT, "index \"" + name + "\" does not exist");
     }
 
-    private boolean relationExists(String name) {
+    /** Есть ли таблица или индекс с таким именем: в PostgreSQL у них общее пространство имён. */
+    public boolean relationExists(String name) {
         return tables.containsKey(name) || tables.values().stream()
                 .flatMap(table -> table.table().indexes().stream())
                 .anyMatch(index -> index.name().equals(name));
