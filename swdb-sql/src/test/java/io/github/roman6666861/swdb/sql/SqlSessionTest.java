@@ -364,6 +364,25 @@ class SqlSessionTest {
     }
 
     @Test
+    void decimalPrimaryKey() {
+        session.execute("CREATE TABLE prices (p DECIMAL(10, 2) PRIMARY KEY, label VARCHAR(10))");
+        // 1.555 Calcite округляет до 1.56 ещё до записи, 2 становится 2.00.
+        session.execute("INSERT INTO prices VALUES (10, 'ten'), (-1.5, 'minus'), (1.555, 'round'), (2, 'two')");
+
+        // Без ORDER BY строки идут в порядке ключа — значит, ключи упорядочены как числа.
+        assertThat(rows("SELECT CAST(p AS VARCHAR) FROM prices"))
+                .containsExactly(List.of("-1.50"), List.of("1.56"), List.of("2.00"), List.of("10.00"));
+        assertThat(rows("SELECT label FROM prices WHERE p = 2.0")).containsExactly(List.of("two"));
+        assertSqlState(() -> session.execute("INSERT INTO prices VALUES (2.00, 'dup')"), SqlStates.UNIQUE_VIOLATION);
+
+        session.execute("UPDATE prices SET p = p + 1");
+        assertThat(rows("SELECT label FROM prices WHERE p = 3")).containsExactly(List.of("two"));
+
+        assertSqlState(() -> session.execute("CREATE TABLE t (p DECIMAL(50, 2) PRIMARY KEY)"),
+                SqlStates.INVALID_PARAMETER_VALUE);
+    }
+
+    @Test
     void unicodeStrings() {
         // VARCHAR(4): длина считается в символах, а не в байтах ('ёжик' в UTF-8 — 8 байт).
         session.execute("CREATE TABLE words (w VARCHAR(4), lang VARCHAR(5), PRIMARY KEY (w))");

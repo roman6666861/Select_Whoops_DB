@@ -1,6 +1,9 @@
 package io.github.roman6666861.swdb.storage;
 
 import java.io.ByteArrayOutputStream;
+import java.math.BigDecimal;
+import java.math.BigInteger;
+import java.math.RoundingMode;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 
@@ -53,6 +56,43 @@ public final class KeyBuilder {
         for (int shift = 56; shift >= 0; shift -= 8) {
             out.write((int) (bits >>> shift));
         }
+        return this;
+    }
+
+    /** Наибольшая точность DECIMAL, которую умеет {@link #appendDecimal}: 10^38 − 1 < 2^127. */
+    public static final int MAX_DECIMAL_PRECISION = 38;
+
+    /**
+     * DECIMAL(precision, scale). Значение приводится к масштабу колонки, и записывается целое
+     * число {@code value · 10^scale}: так {@code 1.5} и {@code 1.50} дают одинаковые байты,
+     * а порядок целых совпадает с порядком десятичных при одном масштабе.
+     * <p>
+     * При {@code precision <= 18} целое помещается в long (10^18 − 1 < 2^63) и пишется как
+     * {@link #appendLong}; иначе — 16 байтами дополнительного кода с инвертированным знаковым битом,
+     * по тому же принципу. Длина зависит только от точности колонки, поэтому за значением
+     * можно дописывать следующие компоненты ключа.
+     *
+     * @throws ArithmeticException если у значения больше знаков после запятой, чем {@code scale},
+     *                             или оно не помещается в {@code precision} цифр
+     */
+    public KeyBuilder appendDecimal(BigDecimal value, int precision, int scale) {
+        if (precision > MAX_DECIMAL_PRECISION) {
+            throw new IllegalArgumentException("DECIMAL precision " + precision + " is above " + MAX_DECIMAL_PRECISION);
+        }
+        BigInteger unscaled = value.setScale(scale, RoundingMode.UNNECESSARY).unscaledValue();
+        if (unscaled.abs().compareTo(BigInteger.TEN.pow(precision)) >= 0) {
+            throw new ArithmeticException(value + " does not fit DECIMAL(" + precision + ", " + scale + ")");
+        }
+        if (precision <= 18) {
+            return appendLong(unscaled.longValue());
+        }
+        // toByteArray — минимальный дополнительный код; дополняем слева знаком до 16 байт.
+        byte[] minimal = unscaled.toByteArray();
+        byte[] bytes = new byte[16];
+        Arrays.fill(bytes, 0, 16 - minimal.length, unscaled.signum() < 0 ? (byte) 0xFF : 0);
+        System.arraycopy(minimal, 0, bytes, 16 - minimal.length, minimal.length);
+        bytes[0] ^= (byte) 0x80;
+        out.writeBytes(bytes);
         return this;
     }
 

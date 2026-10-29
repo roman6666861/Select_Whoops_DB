@@ -234,7 +234,9 @@ final class KeyConditions {
             case BIGINT, TIMESTAMP -> literal.getValueAs(Long.class); // TIMESTAMP — миллисекунды
             case DOUBLE -> literal.getValueAs(Double.class);
             case VARCHAR -> literal.getValueAs(String.class);
-            case DECIMAL -> null; // DECIMAL не бывает в первичном ключе
+            // В ключе DECIMAL приводится к масштабу колонки, а литерал может быть точнее (price = 1.555
+            // при DECIMAL(10, 2)): такие условия пока целиком оставляем Calcite.
+            case DECIMAL -> null;
         };
     }
 

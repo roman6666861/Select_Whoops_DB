@@ -79,7 +79,7 @@ final class RowCodec {
         }
         KeyBuilder key = Keys.data(table.id());
         for (int i = 0; i < values.size(); i++) {
-            appendValue(key, table.columns().get(primaryKey.get(i)).type(), values.get(i));
+            appendValue(key, table.columns().get(primaryKey.get(i)), values.get(i));
         }
         return key.build();
     }
@@ -91,10 +91,10 @@ final class RowCodec {
     byte[] encodeIndexKey(IndexDef index, Object[] row) {
         KeyBuilder key = Keys.index(table.id(), index.id());
         for (int column : index.columns()) {
-            appendNullable(key, table.columns().get(column).type(), row[column]);
+            appendNullable(key, table.columns().get(column), row[column]);
         }
         for (int column : table.primaryKey()) {
-            appendValue(key, table.columns().get(column).type(), row[column]);
+            appendValue(key, table.columns().get(column), row[column]);
         }
         return key.build();
     }
@@ -110,7 +110,7 @@ final class RowCodec {
         }
         KeyBuilder key = Keys.index(table.id(), index.id());
         for (int i = 0; i < values.size(); i++) {
-            appendNullable(key, table.columns().get(index.columns().get(i)).type(), values.get(i));
+            appendNullable(key, table.columns().get(index.columns().get(i)), values.get(i));
         }
         return key.build();
     }
@@ -119,24 +119,26 @@ final class RowCodec {
      * Колонка индекса может быть NULL, поэтому перед значением — байт-флаг: {@code 00} — NULL,
      * {@code 01} — значение. Так NULL-ы лежат в начале индекса и не смешиваются со значениями.
      */
-    private static void appendNullable(KeyBuilder key, ColumnType type, Object value) {
+    private static void appendNullable(KeyBuilder key, ColumnDef column, Object value) {
         if (value == null) {
             key.appendByte(0);
         } else {
             key.appendByte(1);
-            appendValue(key, type, value);
+            appendValue(key, column, value);
         }
     }
 
     /** Значение колонки в упорядоченном кодировании: порядок байтов совпадает с порядком значений. */
-    private static void appendValue(KeyBuilder key, ColumnType type, Object value) {
-        switch (type) {
+    private static void appendValue(KeyBuilder key, ColumnDef column, Object value) {
+        switch (column.type()) {
             case BOOLEAN -> key.appendBoolean((Boolean) value);
             case INTEGER, DATE -> key.appendInt(((Number) value).intValue());
             case BIGINT, TIMESTAMP -> key.appendLong(((Number) value).longValue());
             case DOUBLE -> key.appendDouble(((Number) value).doubleValue());
             case VARCHAR -> key.appendString(value.toString());
-            case DECIMAL -> throw new IllegalStateException("DECIMAL has no ordered key encoding");
+            // DECIMAL(p) без масштаба — это DECIMAL(p, 0), как в SQL.
+            case DECIMAL -> key.appendDecimal(value instanceof BigDecimal d ? d : new BigDecimal(value.toString()),
+                    column.precision(), Math.max(column.scale(), 0));
         }
     }
 

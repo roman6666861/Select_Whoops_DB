@@ -2,12 +2,14 @@ package io.github.roman6666861.swdb.storage;
 
 import org.junit.jupiter.api.Test;
 
+import java.math.BigDecimal;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
 import java.util.function.Function;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Главное свойство кодирования: порядок закодированных ключей совпадает с порядком значений.
@@ -42,6 +44,41 @@ class KeyBuilderTest {
     }
 
     @Test
+    void decimalsKeepOrder() {
+        List<BigDecimal> values = decimals("-99999999.99", "-1.50", "-1", "-0.01", "0", "0.01", "1.5", "2", "10",
+                "99999999.99");
+        // DECIMAL(10, 2): 8 байт, как long.
+        assertKeepsOrder(values, v -> new KeyBuilder().appendDecimal(v, 10, 2).build());
+        assertThat(new KeyBuilder().appendDecimal(BigDecimal.ONE, 10, 2).build()).hasSize(8);
+
+        // DECIMAL(38, 2): 16 байт; значения на краях long и далеко за ними.
+        List<BigDecimal> wide = decimals("-999999999999999999999999999999999999.99", "-92233720368547758.09",
+                "-1", "0", "1", "92233720368547758.08", "999999999999999999999999999999999999.99");
+        assertKeepsOrder(wide, v -> new KeyBuilder().appendDecimal(v, 38, 2).build());
+        assertThat(new KeyBuilder().appendDecimal(BigDecimal.ONE, 38, 2).build()).hasSize(16);
+    }
+
+    @Test
+    void equalDecimalsWithDifferentScaleHaveSameKey() {
+        for (int precision : new int[]{10, 38}) {
+            assertThat(new KeyBuilder().appendDecimal(new BigDecimal("1.5"), precision, 2).build())
+                    .isEqualTo(new KeyBuilder().appendDecimal(new BigDecimal("1.50"), precision, 2).build())
+                    .isEqualTo(new KeyBuilder().appendDecimal(new BigDecimal("15E-1"), precision, 2).build());
+        }
+    }
+
+    @Test
+    void decimalThatDoesNotFitColumnIsRejected() {
+        // Больше знаков после запятой, чем у колонки: округлять молча нельзя.
+        assertThatThrownBy(() -> new KeyBuilder().appendDecimal(new BigDecimal("1.555"), 10, 2))
+                .isInstanceOf(ArithmeticException.class);
+        assertThatThrownBy(() -> new KeyBuilder().appendDecimal(new BigDecimal("100"), 3, 1))
+                .isInstanceOf(ArithmeticException.class);
+        assertThatThrownBy(() -> new KeyBuilder().appendDecimal(BigDecimal.ONE, 39, 0))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
     void compositeKeyComparesComponentByComponent() {
         // ("a", 2) < ("ab", 1): более короткая строка меньше, даже если за ней идёт большее число.
         byte[] a2 = new KeyBuilder().appendString("a").appendInt(2).build();
@@ -64,6 +101,10 @@ class KeyBuilderTest {
 
         assertThat(Arrays.compareUnsigned(new KeyBuilder().appendInt(7).appendString("zzz").build(), end)).isNegative();
         assertThat(Arrays.compareUnsigned(new KeyBuilder().appendInt(8).build(), end)).isNotNegative();
+    }
+
+    private static List<BigDecimal> decimals(String... values) {
+        return Arrays.stream(values).map(BigDecimal::new).toList();
     }
 
     /** {@code sortedValues} уже отсортированы; их ключи должны идти в том же порядке. */

@@ -4,6 +4,7 @@ import io.github.roman6666861.swdb.catalog.ColumnDef;
 import io.github.roman6666861.swdb.catalog.ColumnType;
 import io.github.roman6666861.swdb.common.SqlStates;
 import io.github.roman6666861.swdb.common.SwdbException;
+import io.github.roman6666861.swdb.storage.KeyBuilder;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.sql.SqlBasicTypeNameSpec;
@@ -48,6 +49,11 @@ public final class TypeMapping {
             // Иначе Calcite подставит DECIMAL(19, 0) и молча округлит дробные значения.
             throw new SwdbException(SqlStates.FEATURE_NOT_SUPPORTED,
                     "DECIMAL requires precision, e.g. DECIMAL(10, 2)");
+        }
+        // Больше 38 цифр не умеют ни Calcite (SwdbTypeSystem), ни ключи (KeyBuilder.appendDecimal).
+        if (type == ColumnType.DECIMAL && (precision < 1 || precision > KeyBuilder.MAX_DECIMAL_PRECISION)) {
+            throw new SwdbException(SqlStates.INVALID_PARAMETER_VALUE, "NUMERIC precision " + precision
+                    + " must be between 1 and " + KeyBuilder.MAX_DECIMAL_PRECISION);
         }
         if (type == ColumnType.TIMESTAMP) {
             precision = precision == ColumnDef.UNSPECIFIED

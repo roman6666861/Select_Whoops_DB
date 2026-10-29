@@ -125,8 +125,25 @@ class CatalogTest {
                 .satisfies(e -> assertSqlState(e, SqlStates.FEATURE_NOT_SUPPORTED));
         assertThatThrownBy(() -> catalog.createTable("t", USERS, List.of("nope"), false))
                 .satisfies(e -> assertSqlState(e, SqlStates.UNDEFINED_COLUMN));
-        assertThatThrownBy(() -> catalog.createTable("t", USERS, List.of("balance"), false))
-                .satisfies(e -> assertSqlState(e, SqlStates.FEATURE_NOT_SUPPORTED));
+    }
+
+    @Test
+    void decimalPrimaryKeyKeepsNumericOrder() {
+        catalog.createTable("prices", List.of(new ColumnDef("p", ColumnType.DECIMAL, 10, 2, false)),
+                List.of("p"), false);
+        TableStore prices = catalog.table("prices").orElseThrow();
+        for (String p : List.of("10.00", "-1.50", "2.00", "1.50", "0.00")) {
+            insert(prices, new Object[]{new BigDecimal(p)});
+        }
+
+        assertThat(rows(prices)).extracting(row -> row[0].toString())
+                .containsExactly("-1.50", "0.00", "1.50", "2.00", "10.00");
+        // 1.5 и 1.50 — один и тот же ключ.
+        assertThatThrownBy(() -> insert(prices, new Object[]{new BigDecimal("1.5")}))
+                .satisfies(e -> assertSqlState(e, SqlStates.UNIQUE_VIOLATION));
+        try (KvTransaction tx = catalog.begin()) {
+            assertThat(prices.get(tx, new BigDecimal("2"))).isPresent();
+        }
     }
 
     @Test
@@ -214,8 +231,6 @@ class CatalogTest {
                 .satisfies(e -> assertSqlState(e, SqlStates.UNDEFINED_TABLE));
         assertThatThrownBy(() -> catalog.createIndex("users", "i", List.of("nope"), false))
                 .satisfies(e -> assertSqlState(e, SqlStates.UNDEFINED_COLUMN));
-        assertThatThrownBy(() -> catalog.createIndex("users", "i", List.of("balance"), false))
-                .satisfies(e -> assertSqlState(e, SqlStates.FEATURE_NOT_SUPPORTED));
         assertThat(catalog.table("users").orElseThrow().table().indexes()).hasSize(1);
     }
 

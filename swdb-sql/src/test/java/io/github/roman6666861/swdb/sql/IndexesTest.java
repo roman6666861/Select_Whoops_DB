@@ -100,6 +100,17 @@ class IndexesTest {
     }
 
     @Test
+    void decimalColumnCanBeIndexed() {
+        session.execute("CREATE TABLE accounts (id INT PRIMARY KEY, balance DECIMAL(38, 2))");
+        session.execute("INSERT INTO accounts VALUES (1, 10.5), (2, NULL)");
+
+        session.execute("CREATE INDEX accounts_balance ON accounts (balance)");
+        session.execute("UPDATE accounts SET balance = balance * 2");
+
+        assertThat(rows("SELECT CAST(balance AS VARCHAR) FROM accounts WHERE id = 1")).containsExactly(List.of("21.00"));
+    }
+
+    @Test
     void errors() {
         session.execute("CREATE INDEX users_email ON users (email)");
 
@@ -124,6 +135,10 @@ class IndexesTest {
 
         session.execute("ROLLBACK");
         assertThat(indexes()).isEmpty();
+    }
+
+    private List<List<Object>> rows(String sql) {
+        return ((StatementResult.Rows) session.execute(sql)).rows();
     }
 
     private List<IndexDef> indexes() {

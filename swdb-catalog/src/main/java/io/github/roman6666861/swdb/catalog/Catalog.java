@@ -137,10 +137,6 @@ public final class Catalog {
             if (index < 0) {
                 throw new SwdbException(SqlStates.UNDEFINED_COLUMN, "column \"" + column + "\" does not exist");
             }
-            if (!table.columns().get(index).type().keyable()) {
-                throw new SwdbException(SqlStates.FEATURE_NOT_SUPPORTED,
-                        "type " + table.columns().get(index).type() + " is not supported in indexes yet");
-            }
             indexColumns.add(index);
         }
         // Записи удалённого индекса стираются вместе с его описанием, поэтому номер можно занять снова.
@@ -231,10 +227,6 @@ public final class Catalog {
             if (index < 0) {
                 throw new SwdbException(SqlStates.UNDEFINED_COLUMN,
                         "column \"" + keyColumn + "\" named in key does not exist");
-            }
-            if (!columns.get(index).type().keyable()) {
-                throw new SwdbException(SqlStates.FEATURE_NOT_SUPPORTED,
-                        "type " + columns.get(index).type() + " is not supported in PRIMARY KEY yet");
             }
             if (indexes.contains(index)) {
                 throw new SwdbException(SqlStates.DUPLICATE_COLUMN,

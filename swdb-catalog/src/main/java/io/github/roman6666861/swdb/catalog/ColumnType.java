@@ -14,10 +14,5 @@ public enum ColumnType {
     DECIMAL,
     VARCHAR,
     DATE,
-    TIMESTAMP;
-
-    /** Можно ли использовать тип в первичном ключе (нужно упорядоченное кодирование). */
-    public boolean keyable() {
-        return this != DECIMAL;
-    }
+    TIMESTAMP
 }
