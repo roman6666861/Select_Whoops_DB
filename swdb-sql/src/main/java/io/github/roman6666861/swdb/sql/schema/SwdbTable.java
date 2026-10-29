@@ -1,7 +1,11 @@
 package io.github.roman6666861.swdb.sql.schema;
 
+import io.github.roman6666861.swdb.catalog.Catalog;
 import io.github.roman6666861.swdb.catalog.ColumnDef;
+import io.github.roman6666861.swdb.catalog.TableDef;
 import io.github.roman6666861.swdb.catalog.TableStore;
+import io.github.roman6666861.swdb.common.SqlStates;
+import io.github.roman6666861.swdb.common.SwdbException;
 import io.github.roman6666861.swdb.storage.KvTransaction;
 import org.apache.calcite.DataContext;
 import org.apache.calcite.adapter.java.AbstractQueryableTable;
@@ -39,17 +43,28 @@ import java.util.List;
  */
 final class SwdbTable extends AbstractQueryableTable implements ModifiableTable, FilterableTable {
 
-    private final TableStore store;
+    private final Catalog catalog;
+    private final TableDef table;
     private final SessionTransaction transaction;
 
-    SwdbTable(TableStore store, SessionTransaction transaction) {
+    SwdbTable(Catalog catalog, TableDef table, SessionTransaction transaction) {
         super(Object[].class);
-        this.store = store;
+        this.catalog = catalog;
+        this.table = table;
         this.transaction = transaction;
     }
 
+    /**
+     * Хранилище таблицы на момент выполнения, а не подготовки оператора. План подготовленного
+     * оператора живёт дольше DDL: после CREATE INDEX каталог заменяет {@link TableStore}, и запись
+     * через старый оставила бы новый индекс без записей, а чтение через старый — искало бы
+     * по удалённому индексу. Таблица, пересозданная с тем же именем, — уже другая таблица.
+     */
     TableStore store() {
-        return store;
+        return catalog.table(table.name())
+                .filter(store -> store.table().id() == table.id())
+                .orElseThrow(() -> new SwdbException(SqlStates.UNDEFINED_TABLE,
+                        "relation \"" + table.name() + "\" does not exist"));
     }
 
     /** Транзакция оператора, который сейчас выполняется в сессии. */
@@ -60,7 +75,7 @@ final class SwdbTable extends AbstractQueryableTable implements ModifiableTable,
     @Override
     public RelDataType getRowType(RelDataTypeFactory typeFactory) {
         RelDataTypeFactory.Builder builder = typeFactory.builder();
-        for (ColumnDef column : store.table().columns()) {
+        for (ColumnDef column : table.columns()) {
             builder.add(column.name(), TypeMapping.toRelType(typeFactory, column));
         }
         return builder.build();
@@ -76,7 +91,7 @@ final class SwdbTable extends AbstractQueryableTable implements ModifiableTable,
         return new AbstractTableQueryable<>(queryProvider, schema, this, tableName) {
             @Override
             public Enumerator<T> enumerator() {
-                return new RowEnumerator<>(store, transaction, KeyRange.ALL, row -> (T) row);
+                return new RowEnumerator<>(store(), transaction, KeyRange.ALL, row -> (T) row);
             }
         };
     }
@@ -87,6 +102,7 @@ final class SwdbTable extends AbstractQueryableTable implements ModifiableTable,
      */
     @Override
     public Enumerable<Object[]> scan(DataContext root, List<RexNode> filters) {
+        TableStore store = store();
         KeyRange range = KeyConditions.extract(store.table(), filters, new RexBuilder(root.getTypeFactory()), root);
         return new AbstractEnumerable<>() {
             @Override
@@ -98,7 +114,7 @@ final class SwdbTable extends AbstractQueryableTable implements ModifiableTable,
 
     @Override
     public Collection<Object> getModifiableCollection() {
-        return new RowCollection(store, transaction.current());
+        return new RowCollection(store(), transaction.current());
     }
 
     @Override

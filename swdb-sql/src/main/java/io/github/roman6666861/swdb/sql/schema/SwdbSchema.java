@@ -31,6 +31,6 @@ public final class SwdbSchema extends AbstractSchema {
     }
 
     private Table toCalciteTable(TableStore store) {
-        return new SwdbTable(store, transaction);
+        return new SwdbTable(catalog, store.table(), transaction);
     }
 }

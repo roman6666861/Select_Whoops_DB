@@ -111,6 +111,21 @@ class IndexesTest {
     }
 
     @Test
+    void statementPreparedBeforeCreateIndexMaintainsIt() {
+        PreparedQuery insert = session.prepare("INSERT INTO users VALUES (3, 'c@x', 50)");
+        PreparedQuery update = session.prepare("UPDATE users SET email = 'z@x' WHERE id = 1");
+        PreparedQuery delete = session.prepare("DELETE FROM users WHERE id = 2");
+        session.execute("CREATE INDEX users_email ON users (email)");
+
+        // План подготовлен, когда индекса ещё не было, но пишет уже с ним.
+        insert.execute(List.of());
+        assertThat(entries("users_email")).isEqualTo(3);
+        update.execute(List.of());
+        delete.execute(List.of());
+        assertThat(entries("users_email")).isEqualTo(2);
+    }
+
+    @Test
     void errors() {
         session.execute("CREATE INDEX users_email ON users (email)");
 

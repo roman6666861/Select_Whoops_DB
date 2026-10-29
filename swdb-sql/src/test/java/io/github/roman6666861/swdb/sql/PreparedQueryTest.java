@@ -173,6 +173,17 @@ class PreparedQueryTest {
         }
     }
 
+    @Test
+    void tableRecreatedAfterPrepareIsAnotherTable() {
+        try (PreparedQuery select = session.prepare("SELECT name FROM t WHERE id = $1")) {
+            session.execute("DROP TABLE t");
+            session.execute("CREATE TABLE t (id INT PRIMARY KEY, name INT)");
+
+            // Колонки уже другие: читать новую таблицу по старому плану нельзя.
+            assertSqlState(() -> select.execute(List.of(1)), SqlStates.UNDEFINED_TABLE);
+        }
+    }
+
     private static List<List<Object>> rows(StatementResult result) {
         assertThat(result).isInstanceOf(StatementResult.Rows.class);
         return ((StatementResult.Rows) result).rows();
