@@ -12,6 +12,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Function;
 
 /**
  * Данные одной таблицы: вставка, замена, удаление и чтение строк.
@@ -173,19 +174,51 @@ public final class TableStore {
      * </pre>
      */
     public RowCursor scan(KvTransaction tx, KeyBound lower, KeyBound upper) {
-        byte[] from = lower == null ? Keys.dataPrefix(table.id())
-                : lower.inclusive() ? key(lower) : KeyBuilder.prefixEnd(key(lower));
-        byte[] to = upper == null ? KeyBuilder.prefixEnd(Keys.dataPrefix(table.id()))
-                : upper.inclusive() ? KeyBuilder.prefixEnd(key(upper)) : key(upper);
-        return new RowCursor(tx.scan(from, to), codec);
+        Function<KeyBound, byte[]> key = bound -> codec.encodeKeyPrefix(bound.values());
+        byte[] prefix = Keys.dataPrefix(table.id());
+        return new RowCursor(tx.scan(from(prefix, lower, key), to(prefix, upper, key)), codec);
+    }
+
+    /**
+     * Строки, у которых значения колонок индекса лежат между {@code lower} и {@code upper},
+     * в порядке индекса, а при равных значениях — в порядке первичного ключа. Границы — значения
+     * первых колонок индекса и устроены так же, как в {@link #scan(KvTransaction, KeyBound, KeyBound)};
+     * {@code null} в границе означает NULL (см. {@link KeyBound}).
+     * <p>
+     * Записи индекса проходятся одним последовательным сканом, а каждая строка читается по ключу
+     * из значения записи. Скан и чтения идут по снимку одной транзакции, поэтому видят одно и то же.
+     */
+    public RowCursor scanIndex(KvTransaction tx, IndexDef index, KeyBound lower, KeyBound upper) {
+        if (!table.indexes().contains(index)) {
+            throw new IllegalArgumentException("table " + table.name() + " has no index " + index.name());
+        }
+        Function<KeyBound, byte[]> key = bound -> codec.encodeIndexPrefix(index, bound.values());
+        byte[] prefix = Keys.indexPrefix(table.id(), index.id());
+        return new RowCursor(tx.scan(from(prefix, lower, key), to(prefix, upper, key)), codec,
+                rowKey -> rowOf(tx, rowKey));
+    }
+
+    private byte[] rowOf(KvTransaction tx, byte[] rowKey) {
+        byte[] row = tx.get(rowKey);
+        if (row == null) {
+            // Индекс меняется в одной транзакции со строками, так что это ошибка в нашем коде.
+            throw new SwdbException(SqlStates.INTERNAL_ERROR,
+                    "index entry of table " + table.name() + " points to a missing row");
+        }
+        return row;
+    }
+
+    private static byte[] from(byte[] prefix, KeyBound lower, Function<KeyBound, byte[]> key) {
+        return lower == null ? prefix : lower.inclusive() ? key.apply(lower) : KeyBuilder.prefixEnd(key.apply(lower));
+    }
+
+    private static byte[] to(byte[] prefix, KeyBound upper, Function<KeyBound, byte[]> key) {
+        return upper == null ? KeyBuilder.prefixEnd(prefix)
+                : upper.inclusive() ? KeyBuilder.prefixEnd(key.apply(upper)) : key.apply(upper);
     }
 
     private SwdbException duplicateKey() {
         return new SwdbException(SqlStates.UNIQUE_VIOLATION,
                 "duplicate key value violates unique constraint \"" + table.name() + "_pkey\"");
-    }
-
-    private byte[] key(KeyBound bound) {
-        return codec.encodeKeyPrefix(bound.values());
     }
 }

@@ -14,6 +14,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HexFormat;
 import java.util.List;
 
@@ -273,6 +274,95 @@ class TableStoreTest {
         assertThat(rows(t.scan(tx))).containsExactly(List.of(1, "a"));
     }
 
+    @Test
+    void scanIndexByValueAndRange() {
+        TableStore people = people();
+        IndexDef byAge = index(people, "people_age");
+
+        assertThat(ids(people.scanIndex(tx, byAge, KeyBound.inclusive(30), KeyBound.inclusive(30))))
+                .as("age = 30, при равных значениях — по первичному ключу").containsExactly(1, 3);
+        assertThat(ids(people.scanIndex(tx, byAge, KeyBound.exclusive(20), KeyBound.inclusive(30))))
+                .as("20 < age <= 30").containsExactly(1, 3);
+        assertThat(ids(people.scanIndex(tx, byAge, KeyBound.inclusive(30), null)))
+                .as("age >= 30").containsExactly(1, 3, 5);
+        assertThat(ids(people.scanIndex(tx, byAge, KeyBound.exclusive(25), KeyBound.exclusive(30))))
+                .as("25 < age < 30").isEmpty();
+    }
+
+    @Test
+    void nullsLieBeforeValuesInIndex() {
+        TableStore people = people();
+        IndexDef byAge = index(people, "people_age");
+
+        assertThat(ids(people.scanIndex(tx, byAge, null, null))).as("весь индекс").containsExactly(4, 2, 1, 3, 5);
+        assertThat(ids(people.scanIndex(tx, byAge, KeyBound.inclusive((Object) null), KeyBound.inclusive((Object) null))))
+                .as("age IS NULL").containsExactly(4);
+        // age < 30: нижняя граница «после всех NULL», иначе строка 4 попала бы в результат.
+        assertThat(ids(people.scanIndex(tx, byAge, KeyBound.exclusive((Object) null), KeyBound.exclusive(30))))
+                .as("age < 30").containsExactly(2);
+        assertThat(ids(people.scanIndex(tx, byAge, null, KeyBound.exclusive(30))))
+                .as("без нижней границы NULL входят").containsExactly(4, 2);
+    }
+
+    @Test
+    void compositeIndexPrefix() {
+        TableStore people = people();
+        IndexDef byAgeEmail = index(people, "people_age_email");
+
+        assertThat(ids(people.scanIndex(tx, byAgeEmail, KeyBound.inclusive(30), KeyBound.inclusive(30))))
+                .as("age = 30, по email").containsExactly(3, 1);
+        assertThat(ids(people.scanIndex(tx, byAgeEmail, KeyBound.exclusive(30, "a"), KeyBound.inclusive(30))))
+                .as("age = 30 AND email > 'a'").containsExactly(1);
+        assertThat(ids(people.scanIndex(tx, byAgeEmail, KeyBound.exclusive(30, null), KeyBound.exclusive(30, "b"))))
+                .as("age = 30 AND email < 'b'").containsExactly(3);
+        assertThat(ids(people.scanIndex(tx, byAgeEmail, KeyBound.inclusive(40, null), KeyBound.inclusive(40, null))))
+                .as("age = 40 AND email IS NULL").containsExactly(5);
+    }
+
+    @Test
+    void scanIndexSeesOwnChangesOfTransaction() {
+        TableStore people = people();
+        IndexDef byAge = index(people, "people_age");
+
+        people.insert(tx, new Object[]{6, 30, "z"});
+        people.update(tx, List.of(new TableStore.Change(new Object[]{1, 30, "b"}, new Object[]{1, 41, "b"})));
+        people.delete(tx, new Object[]{3, 30, "a"});
+
+        assertThat(rows(people.scanIndex(tx, byAge, KeyBound.inclusive(30), null)))
+                .containsExactly(List.of(6, 30, "z"), Arrays.asList(5, 40, null), List.of(1, 41, "b"));
+    }
+
+    @Test
+    void scanIndexOfAnotherTableIsRejected() {
+        TableStore people = people();
+
+        assertThatThrownBy(() -> people.scanIndex(tx, new IndexDef(9, "nope", List.of(1)), null, null))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    /**
+     * {@code people(id, age, email)} с индексами {@code people_age (age)} и
+     * {@code people_age_email (age, email)}; строки 4 и 5 содержат NULL.
+     */
+    private TableStore people() {
+        catalog.createTable("people", List.of(
+                        new ColumnDef("id", ColumnType.INTEGER, -1, -1, false),
+                        new ColumnDef("age", ColumnType.INTEGER, -1, -1, true),
+                        new ColumnDef("email", ColumnType.VARCHAR, 10, -1, true)),
+                List.of("id"), false);
+        catalog.createIndex("people", "people_age", List.of("age"), false);
+        catalog.createIndex("people", "people_age_email", List.of("age", "email"), false);
+        TableStore people = catalog.table("people").orElseThrow();
+        for (Object[] row : new Object[][]{{1, 30, "b"}, {2, 20, "a"}, {3, 30, "a"}, {4, null, "c"}, {5, 40, null}}) {
+            people.insert(tx, row);
+        }
+        return people;
+    }
+
+    private static IndexDef index(TableStore table, String name) {
+        return table.table().indexes().stream().filter(i -> i.name().equals(name)).findFirst().orElseThrow();
+    }
+
     /** Таблица {@code t(id, v)} с индексами по {@code (v)} и {@code (v, id)}, без строк. */
     private TableStore indexedTable() {
         intTable();
@@ -336,7 +426,7 @@ class TableStoreTest {
         List<List<Object>> rows = new ArrayList<>();
         try (cursor) {
             while (cursor.next()) {
-                rows.add(List.of(cursor.row()));
+                rows.add(Arrays.asList(cursor.row())); // List.of не принимает NULL
             }
         }
         return rows;

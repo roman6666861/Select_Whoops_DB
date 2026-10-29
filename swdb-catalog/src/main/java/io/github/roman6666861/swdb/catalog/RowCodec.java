@@ -15,6 +15,7 @@ import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * Превращает строку таблицы ({@code Object[]} во внутреннем представлении Calcite) в пару
@@ -76,6 +77,10 @@ final class RowCodec {
         if (values.size() > primaryKey.size()) {
             throw new IllegalArgumentException("table " + table.name() + " has " + primaryKey.size()
                     + " primary key columns, got " + values.size() + " values");
+        }
+        // List.of(...).contains(null) бросает NPE, поэтому через stream.
+        if (values.stream().anyMatch(Objects::isNull)) {
+            throw new IllegalArgumentException("primary key of table " + table.name() + " cannot be NULL");
         }
         KeyBuilder key = Keys.data(table.id());
         for (int i = 0; i < values.size(); i++) {
