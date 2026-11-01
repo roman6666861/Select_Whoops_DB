@@ -177,6 +177,69 @@ class KvTransactionTest {
         assertThat(store.get(bytes("b"))).isEqualTo(bytes("1"));
     }
 
+    @Test
+    void sharedLocksAreCompatibleButBlockExclusive() {
+        try (KvTransaction first = store.begin(); KvTransaction second = store.begin();
+             KvTransaction writer = store.begin(Duration.ofMillis(100))) {
+            first.getForShare(bytes("t"));
+            second.getForShare(bytes("t")); // не ждёт: разделяемые совместимы
+
+            assertSqlState(() -> writer.put(bytes("t"), bytes("x")), SqlStates.LOCK_NOT_AVAILABLE);
+        }
+    }
+
+    @Test
+    void exclusiveWaitsUntilAllSharedAreReleased() throws Exception {
+        try (KvTransaction first = store.begin(); KvTransaction second = store.begin();
+             KvTransaction writer = store.begin()) {
+            first.getForShare(bytes("t"));
+            second.getForShare(bytes("t"));
+            CompletableFuture<Void> write = CompletableFuture.runAsync(() -> writer.put(bytes("t"), bytes("x")));
+
+            first.commit();
+            Thread.sleep(200);
+            assertThat(write).as("second still holds its shared lock").isNotDone();
+
+            second.commit();
+            write.get(5, TimeUnit.SECONDS);
+            writer.commit();
+        }
+        assertThat(store.get(bytes("t"))).isEqualTo(bytes("x"));
+    }
+
+    @Test
+    void sharedWaitsForExclusive() {
+        try (KvTransaction writer = store.begin(); KvTransaction reader = store.begin(Duration.ofMillis(100))) {
+            writer.getForUpdate(bytes("t"));
+
+            assertSqlState(() -> reader.getForShare(bytes("t")), SqlStates.LOCK_NOT_AVAILABLE);
+        }
+    }
+
+    @Test
+    void soleSharedHolderCanUpgradeToExclusive() {
+        try (KvTransaction tx = store.begin()) {
+            tx.getForShare(bytes("t"));
+            tx.put(bytes("t"), bytes("x"));
+            tx.commit();
+        }
+        assertThat(store.get(bytes("t"))).isEqualTo(bytes("x"));
+    }
+
+    @Test
+    void scanLatestSeesCommitsMadeAfterSnapshot() {
+        try (KvTransaction tx = store.begin()) {
+            try (KvTransaction other = store.begin()) {
+                other.put(bytes("a"), bytes("1"));
+                other.commit();
+            }
+            tx.put(bytes("b"), bytes("1"));
+
+            assertThat(keys(tx.scan(bytes("a"), bytes("z")))).as("snapshot").containsExactly("b");
+            assertThat(keys(tx.scanLatest(bytes("a"), bytes("z")))).as("latest").containsExactly("a", "b");
+        }
+    }
+
     private static void assertSqlState(Runnable action, String sqlState) {
         assertThatThrownBy(action::run)
                 .isInstanceOfSatisfying(SwdbException.class, e -> assertThat(e.sqlState()).isEqualTo(sqlState));

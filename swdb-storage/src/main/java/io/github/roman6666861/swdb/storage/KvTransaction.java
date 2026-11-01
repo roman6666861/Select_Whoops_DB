@@ -61,6 +61,22 @@ public final class KvTransaction implements AutoCloseable {
         }
     }
 
+    /**
+     * Как {@link #getForUpdate}, но блокировка <b>разделяемая</b> (как {@code SELECT ... FOR SHARE}
+     * в PostgreSQL): её могут держать сразу несколько транзакций, а исключительная блокировка
+     * ({@link #getForUpdate}, {@link #put}, {@link #delete}) ждёт, пока её не отпустят все.
+     * Так же проверяет, что ключ не менялся после снимка.
+     * <p>
+     * Если транзакция держит разделяемую блокировку одна, её можно усилить до исключительной.
+     */
+    public byte[] getForShare(byte[] key) {
+        try (ReadOptions read = snapshotRead()) {
+            return transaction.getForUpdate(read, key, false);
+        } catch (RocksDBException e) {
+            throw error("getForShare", e);
+        }
+    }
+
     public void put(byte[] key, byte[] value) {
         try {
             transaction.put(key, value);
@@ -80,6 +96,17 @@ public final class KvTransaction implements AutoCloseable {
     /** Ключи из {@code [from, to)} по снимку транзакции вместе с собственными изменениями. */
     public KvIterator scan(byte[] from, byte[] to) {
         ReadOptions read = snapshotRead();
+        return new KvIterator(transaction.getIterator(read), from, to, read);
+    }
+
+    /**
+     * Ключи из {@code [from, to)} в <b>последнем зафиксированном</b> состоянии, а не по снимку,
+     * вместе с собственными изменениями. Нужно, когда транзакция держит блокировку, исключающую
+     * чужую запись в диапазон, но получила её позже своего снимка: строки, зафиксированные
+     * за время ожидания, снимок бы не показал.
+     */
+    public KvIterator scanLatest(byte[] from, byte[] to) {
+        ReadOptions read = new ReadOptions();
         return new KvIterator(transaction.getIterator(read), from, to, read);
     }
 
