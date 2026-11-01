@@ -8,12 +8,15 @@ import io.github.roman6666861.swdb.common.SwdbException;
 import io.github.roman6666861.swdb.storage.KeyBuilder;
 import io.github.roman6666861.swdb.storage.KvIterator;
 import io.github.roman6666861.swdb.storage.KvStore;
+import io.github.roman6666861.swdb.storage.KvTransaction;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.util.Arrays;
+import java.util.Comparator;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -126,6 +129,94 @@ class IndexesTest {
     }
 
     @Test
+    void queriesThroughIndexReturnSameRowsAsFullScan() {
+        session.execute("INSERT INTO users VALUES (3, 'carol@x', 30), (4, NULL, 30), (5, 'dan@x', NULL), "
+                + "(6, 'eve@x', 25), (7, 'ann@x', 40)");
+        List<String> queries = List.of(
+                "SELECT id FROM users WHERE age = 30",
+                "SELECT id FROM users WHERE age > 25",
+                "SELECT id FROM users WHERE age < 31",
+                "SELECT id FROM users WHERE age IS NULL",
+                "SELECT id FROM users WHERE age BETWEEN 26 AND 40",
+                "SELECT id FROM users WHERE age = 30 AND email = 'carol@x'",
+                "SELECT id FROM users WHERE age = 30 AND email IS NULL",
+                "SELECT id FROM users WHERE age = 40 AND email < 'b'",
+                "SELECT id FROM users WHERE email = 'ann@x'",
+                "SELECT id FROM users WHERE email > 'b'",
+                "SELECT id FROM users WHERE age = 30 OR email = 'ann@x'");
+        List<List<List<Object>>> withoutIndexes = queries.stream().map(q -> sorted(rows(q))).toList();
+
+        session.execute("CREATE INDEX users_age ON users (age)");
+        session.execute("CREATE INDEX users_age_email ON users (age, email)");
+        session.execute("CREATE INDEX users_email ON users (email)");
+
+        for (int i = 0; i < queries.size(); i++) {
+            assertThat(sorted(rows(queries.get(i)))).as(queries.get(i)).isEqualTo(withoutIndexes.get(i));
+        }
+    }
+
+    @Test
+    void whereReallyReadsThroughIndex() {
+        session.execute("CREATE INDEX users_email ON users (email)");
+        // Уберём из индекса запись строки 2 в обход TableStore: если запрос идёт через индекс,
+        // строки он не найдёт, а полный скан — нашёл бы.
+        byte[] prefix = new KeyBuilder().appendByte('I').appendInt(table().id()).appendInt(1).build();
+        try (KvTransaction tx = store.begin(); KvIterator it = tx.scan(prefix, KeyBuilder.prefixEnd(prefix))) {
+            while (it.next()) {
+                if (Arrays.equals(it.value(), dataKey(2))) {
+                    tx.delete(it.key());
+                }
+            }
+            tx.commit();
+        }
+
+        assertThat(rows("SELECT id FROM users WHERE email = 'bob@x'")).isEmpty();
+        assertThat(rows("SELECT id FROM users WHERE id = 2")).as("по первичному ключу строка на месте").hasSize(1);
+    }
+
+    @Test
+    void primaryKeyWinsTieWithIndex() {
+        session.execute("CREATE INDEX users_age ON users (age)");
+
+        // id = 1 и age = 30 — по одному равенству; выигрывает первичный ключ, оба условия верны.
+        assertThat(rows("SELECT id FROM users WHERE id = 1 AND age = 30")).containsExactly(List.of(1));
+        assertThat(rows("SELECT id FROM users WHERE id = 1 AND age = 40")).isEmpty();
+    }
+
+    @Test
+    void preparedParametersUseIndex() {
+        session.execute("CREATE INDEX users_age ON users (age)");
+
+        try (PreparedQuery query = session.prepare("SELECT email FROM users WHERE age >= $1 ORDER BY age")) {
+            assertThat(((StatementResult.Rows) query.execute(List.of(35))).rows()).containsExactly(List.of("bob@x"));
+            assertThat(((StatementResult.Rows) query.execute(List.of(0))).rows())
+                    .containsExactly(List.of("ann@x"), List.of("bob@x"));
+        }
+    }
+
+    /**
+     * «Halloween problem»: запрос читает через индекс и меняет ту же колонку. Если бы скан видел
+     * собственные изменения, строка, переехавшая дальше по индексу, встретилась бы снова.
+     */
+    @Test
+    void modificationsThroughIndexSeeEachRowOnce() {
+        session.execute("CREATE INDEX users_age ON users (age)");
+
+        assertThat(session.execute("UPDATE users SET age = age + 100 WHERE age >= 30"))
+                .isEqualTo(new StatementResult.Update("UPDATE", 2));
+        assertThat(rows("SELECT age FROM users ORDER BY id")).containsExactly(List.of(130), List.of(140));
+
+        assertThat(session.execute("INSERT INTO users SELECT id + 10, email, age + 1 FROM users WHERE age > 100"))
+                .isEqualTo(new StatementResult.Update("INSERT", 2));
+        assertThat(rows("SELECT id FROM users WHERE age > 100")).hasSize(4);
+
+        assertThat(session.execute("DELETE FROM users WHERE age > 135"))
+                .isEqualTo(new StatementResult.Update("DELETE", 2));
+        assertThat(rows("SELECT id, age FROM users ORDER BY id")).containsExactly(List.of(1, 130), List.of(11, 131));
+        assertThat(entries("users_age")).isEqualTo(2);
+    }
+
+    @Test
     void errors() {
         session.execute("CREATE INDEX users_email ON users (email)");
 
@@ -154,6 +245,16 @@ class IndexesTest {
 
     private List<List<Object>> rows(String sql) {
         return ((StatementResult.Rows) session.execute(sql)).rows();
+    }
+
+    /** Строки в порядке первой колонки: без ORDER BY порядок зависит от того, через что читали. */
+    private static List<List<Object>> sorted(List<List<Object>> rows) {
+        return rows.stream().sorted(Comparator.comparing(row -> (Integer) row.getFirst())).toList();
+    }
+
+    /** Ключ строки {@code users}: {@code 'D' [tableId] [id]}. */
+    private byte[] dataKey(int id) {
+        return new KeyBuilder().appendByte('D').appendInt(table().id()).appendInt(id).build();
     }
 
     private List<IndexDef> indexes() {

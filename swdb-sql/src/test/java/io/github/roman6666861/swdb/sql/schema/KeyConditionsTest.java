@@ -2,6 +2,7 @@ package io.github.roman6666861.swdb.sql.schema;
 
 import io.github.roman6666861.swdb.catalog.ColumnDef;
 import io.github.roman6666861.swdb.catalog.ColumnType;
+import io.github.roman6666861.swdb.catalog.IndexDef;
 import io.github.roman6666861.swdb.catalog.KeyBound;
 import io.github.roman6666861.swdb.catalog.TableDef;
 import org.apache.calcite.DataContext;
@@ -51,6 +52,17 @@ class KeyConditionsTest {
     /** {@code tags(name VARCHAR(5), PRIMARY KEY (name))}. */
     private static final TableDef TAGS = new TableDef(3, "tags", List.of(
             new ColumnDef("name", ColumnType.VARCHAR, 5, -1, false)), List.of(0));
+
+    private static final IndexDef BY_AGE = new IndexDef(1, "people_age", List.of(1));
+    private static final IndexDef BY_AGE_EMAIL = new IndexDef(2, "people_age_email", List.of(1, 2));
+    private static final IndexDef BY_EMAIL_AGE = new IndexDef(3, "people_email_age", List.of(2, 1));
+
+    /** {@code people(id INT PRIMARY KEY, age INT, email VARCHAR(10))} с индексами (age), (age, email), (email, age). */
+    private static final TableDef PEOPLE = new TableDef(4, "people", List.of(
+            new ColumnDef("id", ColumnType.INTEGER, -1, -1, false),
+            new ColumnDef("age", ColumnType.INTEGER, -1, -1, true),
+            new ColumnDef("email", ColumnType.VARCHAR, 10, -1, true)), List.of(0),
+            List.of(BY_AGE, BY_AGE_EMAIL, BY_EMAIL_AGE));
 
     private final RelDataTypeFactory types = new JavaTypeFactoryImpl();
     private final RexBuilder rex = new RexBuilder(types);
@@ -221,6 +233,89 @@ class KeyConditionsTest {
         assertThat(extract(EVENTS, list(call(EQUALS, column(1), literal(5))))).isEqualTo(KeyRange.ALL);
     }
 
+    // ---- вторичные индексы ----
+
+    @Test
+    void equalityOnIndexedColumnUsesIndex() {
+        List<RexNode> filters = list(call(EQUALS, column(1), literal(5)));
+
+        assertThat(extract(PEOPLE, filters))
+                .isEqualTo(new KeyRange(BY_AGE, KeyBound.inclusive(5), KeyBound.inclusive(5)));
+        assertThat(filters).isEmpty();
+    }
+
+    @Test
+    void rangeWithoutLowerBoundSkipsNulls() {
+        // age < 30: в индексе NULL лежат первыми, нижняя граница — «сразу после NULL».
+        assertThat(extract(PEOPLE, list(call(LESS_THAN, column(1), literal(30)))))
+                .isEqualTo(new KeyRange(BY_AGE, KeyBound.exclusive((Object) null), KeyBound.exclusive(30)));
+        // age > 30: NULL и так раньше нижней границы.
+        assertThat(extract(PEOPLE, list(call(GREATER_THAN, column(1), literal(30)))))
+                .isEqualTo(new KeyRange(BY_AGE, KeyBound.exclusive(30), null));
+    }
+
+    @Test
+    void isNullIsPointInIndex() {
+        List<RexNode> filters = list(call(SqlStdOperatorTable.IS_NULL, column(1)));
+
+        assertThat(extract(PEOPLE, filters))
+                .isEqualTo(new KeyRange(BY_AGE, KeyBound.inclusive((Object) null), KeyBound.inclusive((Object) null)));
+        assertThat(filters).isEmpty();
+    }
+
+    @Test
+    void longerEqualityPrefixWins() {
+        // age = 30 AND email = 'x': у (age, email) два равенства, у (age) — одно.
+        List<RexNode> filters = list(call(EQUALS, column(1), literal(30)), call(EQUALS, varchar(2), varcharLiteral("x")));
+
+        assertThat(extract(PEOPLE, filters))
+                .isEqualTo(new KeyRange(BY_AGE_EMAIL, KeyBound.inclusive(30, "x"), KeyBound.inclusive(30, "x")));
+        assertThat(filters).isEmpty();
+    }
+
+    @Test
+    void compositeIndexPrefixThenRangeSkipsNullsOfRangeColumn() {
+        // email = 'x' AND age < 30 по индексу (email, age): NULL отсекаются во второй колонке.
+        List<RexNode> filters = list(call(EQUALS, varchar(2), varcharLiteral("x")), call(LESS_THAN, column(1), literal(30)));
+
+        assertThat(extract(PEOPLE, filters))
+                .isEqualTo(new KeyRange(BY_EMAIL_AGE, KeyBound.exclusive("x", null), KeyBound.exclusive("x", 30)));
+        assertThat(filters).isEmpty();
+    }
+
+    @Test
+    void varcharRangeOnSecondIndexColumnIsNotUsed() {
+        // age = 30 AND email < 'b' — строковые диапазоны не берутся, остаётся префикс age = 30.
+        RexNode emailLess = call(LESS_THAN, varchar(2), varcharLiteral("b"));
+        List<RexNode> filters = list(call(EQUALS, column(1), literal(30)), emailLess);
+
+        assertThat(extract(PEOPLE, filters))
+                .isEqualTo(new KeyRange(BY_AGE, KeyBound.inclusive(30), KeyBound.inclusive(30)));
+        assertThat(filters).containsExactly(emailLess);
+    }
+
+    @Test
+    void primaryKeyWinsTie() {
+        List<RexNode> filters = list(call(EQUALS, column(0), literal(1)), call(EQUALS, column(1), literal(30)));
+
+        assertThat(extract(PEOPLE, filters)).isEqualTo(point(1));
+        assertThat(filters).as("age = 30 проверит Calcite").hasSize(1);
+    }
+
+    @Test
+    void indexEqualityBeatsPrimaryKeyRange() {
+        List<RexNode> filters = list(call(GREATER_THAN, column(0), literal(1)), call(EQUALS, column(1), literal(30)));
+
+        assertThat(extract(PEOPLE, filters))
+                .isEqualTo(new KeyRange(BY_AGE, KeyBound.inclusive(30), KeyBound.inclusive(30)));
+    }
+
+    @Test
+    void isNullIsNotUsedForPrimaryKey() {
+        // В первичном ключе NULL не бывает; такое условие Calcite и так упростит до FALSE.
+        assertThat(extract(T, list(call(SqlStdOperatorTable.IS_NULL, column(0))))).isEqualTo(KeyRange.ALL);
+    }
+
     // ---- параметры подготовленного оператора ----
 
     @Test
@@ -309,7 +404,11 @@ class KeyConditionsTest {
     }
 
     private RexNode varcharColumn() {
-        return rex.makeInputRef(varchar(), 0);
+        return varchar(0);
+    }
+
+    private RexNode varchar(int index) {
+        return rex.makeInputRef(varchar(), index);
     }
 
     /** Строковый литерал имеет тип CHAR(n); Calcite в запросе приводит его к типу колонки — VARCHAR без длины (TypeMapping). */

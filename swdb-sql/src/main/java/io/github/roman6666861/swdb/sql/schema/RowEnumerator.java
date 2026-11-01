@@ -35,7 +35,9 @@ final class RowEnumerator<T> implements Enumerator<T> {
     @Override
     public boolean moveNext() {
         if (cursor == null) {
-            cursor = store.scan(transaction.current(), range.lower(), range.upper());
+            cursor = range.index() == null
+                    ? store.scan(transaction.current(), range.lower(), range.upper())
+                    : store.scanIndex(transaction.current(), range.index(), range.lower(), range.upper());
         }
         return cursor.next();
     }

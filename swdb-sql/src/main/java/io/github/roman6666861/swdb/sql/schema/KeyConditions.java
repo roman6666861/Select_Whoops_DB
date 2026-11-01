@@ -1,6 +1,7 @@
 package io.github.roman6666861.swdb.sql.schema;
 
 import io.github.roman6666861.swdb.catalog.ColumnType;
+import io.github.roman6666861.swdb.catalog.IndexDef;
 import io.github.roman6666861.swdb.catalog.KeyBound;
 import io.github.roman6666861.swdb.catalog.TableDef;
 import org.apache.calcite.DataContext;
@@ -20,7 +21,8 @@ import java.util.List;
 import java.util.Optional;
 
 /**
- * Превращает условия из WHERE в диапазон первичного ключа, чтобы не читать всю таблицу.
+ * Превращает условия из WHERE в диапазон первичного ключа или вторичного индекса, чтобы не читать
+ * всю таблицу.
  * <p>
  * Calcite передаёт в {@code FilterableTable.scan} список условий, соединённых через AND
  * (элемент списка сам может быть AND из нескольких условий). Элементы, полностью выполненные
@@ -39,6 +41,9 @@ import java.util.Optional;
  *   d > 1                    → строки с d > 1
  *   seq = 2                  → вся таблица: без d строки с seq = 2 разбросаны по всему ключу
  * </pre>
+ * Так же разбираются колонки каждого индекса. Из всех вариантов берётся тот, где больше колонок
+ * с {@code =}, а при равенстве — где есть ещё и диапазон. При полной ничьей выигрывает первичный
+ * ключ: строка читается сразу, а через индекс — вторым чтением по ключу из записи индекса.
  */
 final class KeyConditions {
 
@@ -79,14 +84,59 @@ final class KeyConditions {
             conditions.addAll(RelOptUtil.conjunctions(filter));
         }
 
+        Path best = path(table, null, table.primaryKey(), conditions, rex, root);
+        for (IndexDef index : table.indexes()) {
+            Path candidate = path(table, index, index.columns(), conditions, rex, root);
+            if (candidate.betterThan(best)) {
+                best = candidate;
+            }
+        }
+        if (best.isEmpty()) {
+            return KeyRange.ALL;
+        }
+
+        // Calcite разрешает только удалять элементы списка, но не заменять их частями. Поэтому
+        // AND(id = 5, v < 100) остаётся целиком: ключ используется, а условие Calcite перепроверит.
+        List<RexNode> used = best.used();
+        filters.removeIf(filter -> RelOptUtil.conjunctions(filter).stream()
+                .allMatch(condition -> used.stream().anyMatch(u -> u == condition)));
+        return best.range();
+    }
+
+    /**
+     * Один способ прочитать таблицу: диапазон и условия, которые он выполняет полностью.
+     *
+     * @param equalities сколько первых колонок задано через {@code =} или {@code IS NULL}
+     * @param hasRange   есть ли после них диапазон
+     */
+    private record Path(KeyRange range, List<RexNode> used, int equalities, boolean hasRange) {
+
+        boolean isEmpty() {
+            return equalities == 0 && !hasRange;
+        }
+
+        boolean betterThan(Path other) {
+            return equalities != other.equalities ? equalities > other.equalities : hasRange && !other.hasRange;
+        }
+    }
+
+    /**
+     * Диапазон по колонкам первичного ключа ({@code index == null}) или индекса.
+     * <p>
+     * В индексе, в отличие от первичного ключа, бывает NULL, и лежит он раньше всех значений колонки.
+     * Без нижней границы диапазон начался бы с NULL, а {@code age < 30} не должно их возвращать,
+     * поэтому нижней границей тогда служит «сразу после NULL». Зато {@code IS NULL} в индексе — точка.
+     */
+    private static Path path(TableDef table, IndexDef index, List<Integer> columns, List<RexNode> conditions,
+                             RexBuilder rex, DataContext root) {
         List<Object> prefix = new ArrayList<>();
         List<RexNode> used = new ArrayList<>();
         ColumnRange range = new ColumnRange(null, null);
-        for (int column : table.primaryKey()) {
+        for (int column : columns) {
             ColumnType type = table.columns().get(column).type();
-            Optional<Object> equal = findEquality(conditions, column, type, rex, root, used);
+            Optional<Side> equal = findEquality(conditions, column, type, index != null, rex, root, used);
             if (equal.isPresent()) {
-                prefix.add(equal.get());
+                prefix.add(equal.get().value());
                 continue;
             }
             if (rangeKeepsOrder(type)) {
@@ -94,27 +144,39 @@ final class KeyConditions {
             }
             break; // дальше ключ упорядочен только внутри одного значения этой колонки
         }
-        if (prefix.isEmpty() && range.lower() == null && range.upper() == null) {
-            return KeyRange.ALL;
-        }
-
-        // Calcite разрешает только удалять элементы списка, но не заменять их частями. Поэтому
-        // AND(id = 5, v < 100) остаётся целиком: ключ используется, а условие Calcite перепроверит.
-        filters.removeIf(filter -> RelOptUtil.conjunctions(filter).stream()
-                .allMatch(condition -> used.stream().anyMatch(u -> u == condition)));
-        return new KeyRange(bound(prefix, range.lower()), bound(prefix, range.upper()));
+        boolean hasRange = range.lower() != null || range.upper() != null;
+        Side lower = index != null && range.lower() == null && range.upper() != null
+                ? new Side(null, false) // после всех NULL
+                : range.lower();
+        KeyRange keyRange = new KeyRange(index, bound(prefix, lower), bound(prefix, range.upper()));
+        return new Path(keyRange, used, prefix.size(), hasRange);
     }
 
-    private static Optional<Object> findEquality(List<RexNode> conditions, int column, ColumnType type,
-                                                 RexBuilder rex, DataContext root, List<RexNode> used) {
+    /**
+     * Условие {@code колонка = значение}, а в индексе ещё и {@code колонка IS NULL};
+     * у найденной точки {@code value} — значение или {@code null}.
+     */
+    private static Optional<Side> findEquality(List<RexNode> conditions, int column, ColumnType type,
+                                               boolean nullable, RexBuilder rex, DataContext root,
+                                               List<RexNode> used) {
         for (RexNode condition : conditions) {
+            if (nullable && isNullCheck(condition, column)) {
+                used.add(condition);
+                return Optional.of(new Side(null, true));
+            }
             Optional<ColumnRange> range = columnRange(condition, column, type, rex, root);
             if (range.isPresent() && range.get().isPoint()) {
                 used.add(condition);
-                return Optional.of(range.get().lower().value());
+                return Optional.of(range.get().lower());
             }
         }
         return Optional.empty();
+    }
+
+    private static boolean isNullCheck(RexNode condition, int column) {
+        return condition.getKind() == SqlKind.IS_NULL
+                && ((RexCall) condition).getOperands().getFirst() instanceof RexInputRef ref
+                && ref.getIndex() == column;
     }
 
     /** Собирает нижнюю и верхнюю границы из условий; условие, повторяющее уже взятую сторону, остаётся Calcite. */
