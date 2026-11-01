@@ -340,6 +340,101 @@ class TableStoreTest {
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
+    @Test
+    void uniqueIndexRejectsDuplicateValues() {
+        TableStore t = uniqueTable(1, 2);
+
+        assertThatThrownBy(() -> t.insert(tx, new Object[]{3, "v1"}))
+                .isInstanceOfSatisfying(SwdbException.class, e -> {
+                    assertThat(e.sqlState()).isEqualTo(SqlStates.UNIQUE_VIOLATION);
+                    assertThat(e.getMessage()).isEqualTo("duplicate key value violates unique constraint \"t_v\"");
+                });
+        // NULL не равен даже NULL: таких строк может быть сколько угодно.
+        t.insert(tx, new Object[]{4, null});
+        t.insert(tx, new Object[]{5, null});
+
+        assertThat(rows(t.scan(tx))).hasSize(4);
+        assertIndexesMatchRows(t, 4);
+    }
+
+    @Test
+    void uniqueIndexInUpdate() {
+        TableStore t = uniqueTable(1, 2, 3);
+
+        // Обмен значениями: новое значение каждой строки — старое значение другой.
+        t.update(tx, List.of(change(1, "v1", 1, "v2"), change(2, "v2", 2, "v1")));
+        assertThat(rows(t.scan(tx))).containsExactly(List.of(1, "v2"), List.of(2, "v1"), List.of(3, "v3"));
+
+        // Значение занято строкой, которая не меняется, или достаётся двум строкам сразу.
+        assertDuplicate(() -> t.update(tx, List.of(change(1, "v2", 1, "v3"))));
+        assertDuplicate(() -> t.update(tx, List.of(change(1, "v2", 1, "x"), change(2, "v1", 2, "x"))));
+
+        // Строка переезжает на другой первичный ключ с тем же значением: запись индекса та же,
+        // но теперь указывает на новый ключ строки.
+        t.update(tx, List.of(change(3, "v3", 30, "v3")));
+        assertThat(rows(t.scanIndex(tx, t.table().indexes().getFirst(), KeyBound.inclusive("v3"), KeyBound.inclusive("v3"))))
+                .containsExactly(List.of(30, "v3"));
+        assertIndexesMatchRows(t, 3);
+    }
+
+    @Test
+    void sameUniqueValueInTwoTransactionsWaitsForLock() {
+        TableStore t = uniqueTable();
+        tx.commit();
+        try (KvTransaction first = catalog.begin(); KvTransaction second = store.begin(Duration.ofMillis(100))) {
+            t.insert(first, new Object[]{1, "same"});
+
+            // Первичные ключи разные, но ключ уникальной записи один — вторая транзакция ждёт первую.
+            assertThatThrownBy(() -> t.insert(second, new Object[]{2, "same"}))
+                    .isInstanceOfSatisfying(SwdbException.class,
+                            e -> assertThat(e.sqlState()).isEqualTo(SqlStates.LOCK_NOT_AVAILABLE));
+            first.commit();
+        }
+        try (KvTransaction third = catalog.begin()) {
+            assertDuplicate(() -> t.insert(third, new Object[]{2, "same"}));
+        }
+        tx.close();
+        tx = catalog.begin();
+    }
+
+    @Test
+    void uniqueIndexOnDuplicateDataIsNotCreated() {
+        intTable(1, 2);
+        catalog.table("t").orElseThrow().insert(tx, new Object[]{3, "v1"});
+        catalog.table("t").orElseThrow().insert(tx, new Object[]{4, null});
+        catalog.table("t").orElseThrow().insert(tx, new Object[]{5, null});
+        tx.commit();
+
+        assertThatThrownBy(() -> catalog.createIndex("t", "t_v", List.of("v"), true, false))
+                .isInstanceOfSatisfying(SwdbException.class, e -> {
+                    assertThat(e.sqlState()).isEqualTo(SqlStates.UNIQUE_VIOLATION);
+                    assertThat(e.getMessage()).isEqualTo("could not create unique index \"t_v\"");
+                });
+        assertThat(catalog.table("t").orElseThrow().table().indexes()).isEmpty();
+
+        // Без дубликатов (NULL не в счёт) индекс создаётся.
+        assertThat(catalog.createIndex("t", "t_id_v", List.of("id", "v"), true, false)).isTrue();
+        tx.close();
+        tx = catalog.begin();
+        assertIndexesMatchRows(catalog.table("t").orElseThrow(), 5);
+    }
+
+    private static void assertDuplicate(Runnable action) {
+        assertThatThrownBy(action::run).isInstanceOfSatisfying(SwdbException.class,
+                e -> assertThat(e.sqlState()).isEqualTo(SqlStates.UNIQUE_VIOLATION));
+    }
+
+    /** {@code t(id, v)} с уникальным индексом {@code t_v (v)} и строками {@code (id, "v" + id)}. */
+    private TableStore uniqueTable(int... ids) {
+        intTable();
+        catalog.createIndex("t", "t_v", List.of("v"), true, false);
+        TableStore t = catalog.table("t").orElseThrow();
+        for (int id : ids) {
+            t.insert(tx, new Object[]{id, "v" + id});
+        }
+        return t;
+    }
+
     /**
      * {@code people(id, age, email)} с индексами {@code people_age (age)} и
      * {@code people_age_email (age, email)}; строки 4 и 5 содержат NULL.

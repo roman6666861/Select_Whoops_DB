@@ -217,6 +217,33 @@ class IndexesTest {
     }
 
     @Test
+    void uniqueIndex() {
+        session.execute("CREATE UNIQUE INDEX users_email_key ON users (email)");
+        assertThat(indexes()).containsExactly(new IndexDef(1, "users_email_key", List.of(1), true));
+
+        assertThatThrownBy(() -> session.execute("INSERT INTO users VALUES (3, 'ann@x', 50)"))
+                .isInstanceOfSatisfying(SwdbException.class, e -> {
+                    assertThat(e.sqlState()).isEqualTo(SqlStates.UNIQUE_VIOLATION);
+                    assertThat(e.getMessage())
+                            .isEqualTo("duplicate key value violates unique constraint \"users_email_key\"");
+                });
+        assertSqlState("UPDATE users SET email = 'ann@x'", SqlStates.UNIQUE_VIOLATION);
+        session.execute("INSERT INTO users VALUES (3, NULL, 50), (4, NULL, 60)");
+        session.execute("UPDATE users SET email = CASE id WHEN 1 THEN 'bob@x' WHEN 2 THEN 'ann@x' END WHERE id <= 2");
+
+        assertThat(rows("SELECT id FROM users WHERE email = 'ann@x'")).containsExactly(List.of(2));
+        assertThat(rows("SELECT id FROM users WHERE email IS NULL ORDER BY id")).containsExactly(List.of(3), List.of(4));
+    }
+
+    @Test
+    void uniqueIndexOnDuplicatesFails() {
+        session.execute("INSERT INTO users VALUES (3, 'x@x', 30)");
+
+        assertSqlState("CREATE UNIQUE INDEX users_age_key ON users (age)", SqlStates.UNIQUE_VIOLATION);
+        assertThat(indexes()).isEmpty();
+    }
+
+    @Test
     void errors() {
         session.execute("CREATE INDEX users_email ON users (email)");
 
@@ -226,7 +253,6 @@ class IndexesTest {
                 .isEqualTo(new StatementResult.Update("CREATE INDEX", 0));
         assertSqlState("CREATE INDEX i ON missing (age)", SqlStates.UNDEFINED_TABLE);
         assertSqlState("CREATE INDEX i ON users (missing)", SqlStates.UNDEFINED_COLUMN);
-        assertSqlState("CREATE UNIQUE INDEX i ON users (age)", SqlStates.FEATURE_NOT_SUPPORTED);
         assertSqlState("DROP INDEX missing", SqlStates.UNDEFINED_OBJECT);
         assertSqlState("CREATE INDEX i ON users", SqlStates.SYNTAX_ERROR);
 

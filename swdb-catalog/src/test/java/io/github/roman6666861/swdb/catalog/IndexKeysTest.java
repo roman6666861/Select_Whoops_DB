@@ -44,6 +44,28 @@ class IndexKeysTest {
     }
 
     @Test
+    void uniqueEntryHasNoPrimaryKeyUnlessValueIsNull() {
+        IndexDef unique = new IndexDef(3, "users_email_key", List.of(1), true);
+        RowCodec codec = new RowCodec(USERS.withIndex(unique));
+
+        // Без первичного ключа: у строк с одним значением один и тот же ключ записи.
+        assertThat(hex(codec.encodeIndexKey(unique, new Object[]{5, "bob", 30})))
+                .isEqualTo("49" + "80000007" + "80000003" + "01" + "626f62" + "0001");
+        assertThat(codec.encodeIndexKey(unique, new Object[]{6, "bob", 31}))
+                .isEqualTo(codec.encodeIndexKey(unique, new Object[]{5, "bob", 30}));
+        // NULL-ы не равны друг другу: ключ дополнен первичным ключом, как в обычном индексе.
+        assertThat(hex(codec.encodeIndexKey(unique, new Object[]{5, null, 30})))
+                .isEqualTo("49" + "80000007" + "80000003" + "00" + "80000005");
+    }
+
+    @Test
+    void indexSavedBeforeUniqueExistedIsNotUnique() throws Exception {
+        String old = "{\"id\":1,\"name\":\"i\",\"columns\":[1]}";
+
+        assertThat(new ObjectMapper().readValue(old, IndexDef.class)).isEqualTo(new IndexDef(1, "i", List.of(1), false));
+    }
+
+    @Test
     void entriesAreOrderedByValueThenPrimaryKey() {
         Object[][] rows = {{4, "bob", 1}, {1, "carol", 1}, {3, "ann", 1}, {2, "bob", 1}, {9, null, 1}};
         List<byte[]> keys = new ArrayList<>();

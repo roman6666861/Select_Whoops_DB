@@ -92,16 +92,31 @@ final class RowCodec {
     /**
      * Ключ записи индекса для строки: значения колонок индекса, затем первичный ключ.
      * Строка должна быть уже {@link #normalize нормализована}.
+     * <p>
+     * В {@link #isUniqueEntry уникальной записи} первичного ключа нет: тогда у строк с одинаковыми
+     * значениями совпадает и ключ записи, и проверка уникальности — это чтение одного ключа
+     * с блокировкой, как для первичного ключа.
      */
     byte[] encodeIndexKey(IndexDef index, Object[] row) {
         KeyBuilder key = Keys.index(table.id(), index.id());
         for (int column : index.columns()) {
             appendNullable(key, table.columns().get(column), row[column]);
         }
-        for (int column : table.primaryKey()) {
-            appendValue(key, table.columns().get(column), row[column]);
+        if (!isUniqueEntry(index, row)) {
+            for (int column : table.primaryKey()) {
+                appendValue(key, table.columns().get(column), row[column]);
+            }
         }
         return key.build();
+    }
+
+    /**
+     * Должна ли запись строки в этом индексе быть единственной с таким ключом: индекс уникальный
+     * и в значениях нет NULL. Строк с NULL может быть сколько угодно, у их записей ключ дополнен
+     * первичным ключом, как в обычном индексе.
+     */
+    boolean isUniqueEntry(IndexDef index, Object[] row) {
+        return index.unique() && index.columns().stream().allMatch(column -> row[column] != null);
     }
 
     /**

@@ -9,6 +9,7 @@ import io.github.roman6666861.swdb.storage.KvTransaction;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -118,7 +119,15 @@ public final class Catalog {
      *
      * @return {@code false}, если индекс или таблица с таким именем уже есть и задан {@code ifNotExists}
      */
-    public synchronized boolean createIndex(String tableName, String name, List<String> columns,
+    public boolean createIndex(String tableName, String name, List<String> columns, boolean ifNotExists) {
+        return createIndex(tableName, name, columns, false, ifNotExists);
+    }
+
+    /**
+     * Как {@link #createIndex(String, String, List, boolean)}, но индекс может быть уникальным.
+     * Если в таблице уже есть строки с одинаковыми значениями, индекс не создаётся.
+     */
+    public synchronized boolean createIndex(String tableName, String name, List<String> columns, boolean unique,
                                             boolean ifNotExists) {
         if (relationExists(name)) {
             if (ifNotExists) {
@@ -141,14 +150,23 @@ public final class Catalog {
         }
         // Записи удалённого индекса стираются вместе с его описанием, поэтому номер можно занять снова.
         int id = table.indexes().stream().mapToInt(IndexDef::id).max().orElse(0) + 1;
-        IndexDef index = new IndexDef(id, name, indexColumns);
+        IndexDef index = new IndexDef(id, name, indexColumns, unique);
         TableDef withIndex = table.withIndex(index);
         RowCodec codec = new RowCodec(withIndex);
 
         store.write(batch -> {
+            // Ключи уникальных записей: совпадение — две строки с одинаковыми значениями.
+            Set<ByteBuffer> uniqueEntries = new HashSet<>();
             try (KvIterator it = store.scan(Keys.dataPrefix(table.id()))) {
                 while (it.next()) {
-                    batch.put(codec.encodeIndexKey(index, codec.decodeValue(it.value())), it.key());
+                    Object[] row = codec.decodeValue(it.value());
+                    byte[] entry = codec.encodeIndexKey(index, row);
+                    if (codec.isUniqueEntry(index, row) && !uniqueEntries.add(ByteBuffer.wrap(entry))) {
+                        // Пакет ещё не записан: исключение отменяет и записи индекса, и описание.
+                        throw new SwdbException(SqlStates.UNIQUE_VIOLATION,
+                                "could not create unique index \"" + name + "\"");
+                    }
+                    batch.put(entry, it.key());
                 }
             }
             batch.put(Keys.tableMeta(table.id()), toJson(withIndex));

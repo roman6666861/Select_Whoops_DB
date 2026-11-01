@@ -72,11 +72,8 @@ final class DdlExecutor {
     }
 
     StatementResult createIndex(IndexCommand.Create create) {
-        if (create.unique()) {
-            throw unsupported("CREATE UNIQUE INDEX");
-        }
         String name = create.name() != null ? create.name() : defaultIndexName(create.table(), create.columns());
-        catalog.createIndex(create.table(), name, create.columns(), create.ifNotExists());
+        catalog.createIndex(create.table(), name, create.columns(), create.unique(), create.ifNotExists());
         return new StatementResult.Update("CREATE INDEX", 0);
     }
 

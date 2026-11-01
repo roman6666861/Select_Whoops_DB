@@ -43,12 +43,19 @@ public final class TableStore {
         Object[] normalized = codec.normalize(row);
         byte[] key = codec.encodeKey(normalized);
         if (tx.getForUpdate(key) != null) {
-            throw duplicateKey();
+            throw duplicateKey(primaryKeyName());
+        }
+        List<byte[]> entries = new ArrayList<>(table.indexes().size());
+        for (IndexDef index : table.indexes()) {
+            byte[] entry = codec.encodeIndexKey(index, normalized);
+            // Как и для первичного ключа: getForUpdate блокирует ключ, даже если его ещё нет.
+            if (codec.isUniqueEntry(index, normalized) && tx.getForUpdate(entry) != null) {
+                throw duplicateKey(index.name());
+            }
+            entries.add(entry);
         }
         tx.put(key, codec.encodeValue(normalized));
-        for (IndexDef index : table.indexes()) {
-            tx.put(codec.encodeIndexKey(index, normalized), key);
-        }
+        entries.forEach(entry -> tx.put(entry, key));
     }
 
     /**
@@ -83,8 +90,10 @@ public final class TableStore {
      * хотя новый ключ одной строки совпадает со старым ключом другой. Строка, которой уже нет,
      * пропускается.
      * <p>
-     * Запись индекса меняется, только если изменился её ключ: значение индексируемой колонки
-     * или первичный ключ. Старые записи, как и в {@link #delete}, вычисляются по строке из хранилища.
+     * Запись индекса меняется, только если изменился её ключ (значение индексируемой колонки
+     * или первичный ключ) или строка переехала: в уникальной записи первичного ключа нет, но
+     * в значении лежит ключ строки. Старые записи, как и в {@link #delete}, вычисляются по строке
+     * из хранилища. Уникальные индексы проверяются так же, как первичный ключ.
      *
      * @return число заменённых строк
      */
@@ -104,42 +113,72 @@ public final class TableStore {
                         codec.encodeKey(after), after, codec.encodeValue(after)));
             }
         }
-        // ByteBuffer сравнивается по содержимому, поэтому годится как ключ множества.
         Set<ByteBuffer> freed = new HashSet<>();
+        List<Claim> claims = new ArrayList<>(prepared.size());
         for (Prepared p : prepared) {
             if (p.moves()) {
                 freed.add(ByteBuffer.wrap(p.oldKey()));
             }
+            claims.add(new Claim(p.newKey(), p.moves()));
         }
-        Set<ByteBuffer> taken = new HashSet<>();
-        for (Prepared p : prepared) {
-            ByteBuffer newKey = ByteBuffer.wrap(p.newKey());
-            boolean occupied = p.moves() && !freed.contains(newKey) && tx.getForUpdate(p.newKey()) != null;
-            if (!taken.add(newKey) || occupied) {
-                throw duplicateKey();
-            }
-        }
-        // Сначала все удаления, потом все записи: строка может занять ключ, освобождённый другой.
-        prepared.stream().filter(Prepared::moves).forEach(p -> tx.delete(p.oldKey()));
-        prepared.forEach(p -> tx.put(p.newKey(), p.value()));
+        checkUnique(tx, freed, claims, primaryKeyName());
 
         // С записями индексов так же: если две строки обмениваются первичными ключами при одинаковом
         // значении колонки, новая запись одной совпадает со старой записью другой.
         List<byte[]> stale = new ArrayList<>();
         List<byte[][]> fresh = new ArrayList<>();
-        for (Prepared p : prepared) {
-            for (IndexDef index : table.indexes()) {
+        for (IndexDef index : table.indexes()) {
+            Set<ByteBuffer> freedEntries = new HashSet<>();
+            List<Claim> entryClaims = new ArrayList<>();
+            for (Prepared p : prepared) {
                 byte[] oldEntry = codec.encodeIndexKey(index, p.before());
                 byte[] newEntry = codec.encodeIndexKey(index, p.after());
-                if (!Arrays.equals(oldEntry, newEntry)) {
+                boolean entryChanges = !Arrays.equals(oldEntry, newEntry);
+                if (entryChanges || p.moves()) {
                     stale.add(oldEntry);
                     fresh.add(new byte[][]{newEntry, p.newKey()});
                 }
+                if (entryChanges && codec.isUniqueEntry(index, p.before())) {
+                    freedEntries.add(ByteBuffer.wrap(oldEntry));
+                }
+                if (codec.isUniqueEntry(index, p.after())) {
+                    entryClaims.add(new Claim(newEntry, entryChanges));
+                }
             }
+            checkUnique(tx, freedEntries, entryClaims, index.name());
         }
+
+        // Сначала все удаления, потом все записи: строка может занять ключ, освобождённый другой.
+        prepared.stream().filter(Prepared::moves).forEach(p -> tx.delete(p.oldKey()));
+        prepared.forEach(p -> tx.put(p.newKey(), p.value()));
         stale.forEach(tx::delete);
         fresh.forEach(entry -> tx.put(entry[0], entry[1]));
         return prepared.size();
+    }
+
+    /**
+     * Ключ, который строка займёт после замены.
+     *
+     * @param changed ключ новый для этой строки; иначе он и так её, и проверять его не нужно
+     */
+    private record Claim(byte[] key, boolean changed) {
+    }
+
+    /**
+     * Никакие две строки не займут один ключ: ни две строки замены, ни строка замены и строка,
+     * которая не меняется. Ключ, который освобождает другая строка замены ({@code freed}),
+     * занять можно.
+     */
+    private static void checkUnique(KvTransaction tx, Set<ByteBuffer> freed, List<Claim> claims, String constraint) {
+        // ByteBuffer сравнивается по содержимому, поэтому годится как ключ множества.
+        Set<ByteBuffer> taken = new HashSet<>();
+        for (Claim claim : claims) {
+            ByteBuffer key = ByteBuffer.wrap(claim.key());
+            boolean occupied = claim.changed() && !freed.contains(key) && tx.getForUpdate(claim.key()) != null;
+            if (!taken.add(key) || occupied) {
+                throw duplicateKey(constraint);
+            }
+        }
     }
 
     /**
@@ -217,8 +256,13 @@ public final class TableStore {
                 : upper.inclusive() ? KeyBuilder.prefixEnd(key.apply(upper)) : key.apply(upper);
     }
 
-    private SwdbException duplicateKey() {
+    /** Так PostgreSQL называет ограничение первичного ключа. */
+    private String primaryKeyName() {
+        return table.name() + "_pkey";
+    }
+
+    private static SwdbException duplicateKey(String constraint) {
         return new SwdbException(SqlStates.UNIQUE_VIOLATION,
-                "duplicate key value violates unique constraint \"" + table.name() + "_pkey\"");
+                "duplicate key value violates unique constraint \"" + constraint + "\"");
     }
 }
