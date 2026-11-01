@@ -94,6 +94,20 @@ public final class Catalog {
                 .map(relation -> storeOf(tx.get(Keys.tableMeta(relation.tableId()))));
     }
 
+    /**
+     * Таблица для оператора, который будет её читать или менять. Описание читается с
+     * <b>разделяемой</b> блокировкой до конца транзакции, как {@code ACCESS SHARE} и
+     * {@code ROW EXCLUSIVE} в PostgreSQL: такие операторы друг другу не мешают, а DDL этой таблицы
+     * ждёт, пока транзакция не закончится. Если DDL успели зафиксировать после снимка транзакции,
+     * описание по снимку устарело — тогда {@code 40001}, и транзакцию нужно повторить.
+     */
+    public Optional<TableStore> openTable(KvTransaction tx, String name) {
+        return relation(tx.get(Keys.relationName(name)))
+                .filter(relation -> relation.kind() == TABLE)
+                .map(relation -> tx.getForShare(Keys.tableMeta(relation.tableId())))
+                .map(this::storeOf);
+    }
+
     /** Таблица в последнем зафиксированном состоянии каталога. */
     public Optional<TableStore> table(String name) {
         return autocommit(tx -> table(tx, name));
@@ -166,7 +180,7 @@ public final class Catalog {
             }
             throw new SwdbException(SqlStates.UNDEFINED_TABLE, "table \"" + name + "\" does not exist");
         }
-        TableDef table = storeOf(tx.get(Keys.tableMeta(relation.get().tableId()))).table();
+        TableDef table = lockExclusive(tx, relation.get().tableId());
         // Удаления диапазона (deleteRange) в транзакции нет: строки удаляются по одной.
         deleteAll(tx, Keys.dataPrefix(table.id()));
         for (IndexDef index : table.indexes()) {
@@ -200,10 +214,10 @@ public final class Catalog {
             }
             throw relationAlreadyExists(name);
         }
-        TableDef table = table(tx, tableName)
+        TableDef table = lockExclusive(tx, table(tx, tableName)
                 .orElseThrow(() -> new SwdbException(SqlStates.UNDEFINED_TABLE,
                         "relation \"" + tableName + "\" does not exist"))
-                .table();
+                .table().id());
         List<Integer> indexColumns = new ArrayList<>(columns.size());
         for (String column : columns) {
             int index = indexOf(table.columns(), column);
@@ -221,7 +235,7 @@ public final class Catalog {
         // Ключи уникальных записей: совпадение — две строки с одинаковыми значениями.
         Set<ByteBuffer> uniqueEntries = new HashSet<>();
         byte[] rows = Keys.dataPrefix(table.id());
-        try (KvIterator it = tx.scan(rows, KeyBuilder.prefixEnd(rows))) {
+        try (KvIterator it = tx.scanLatest(rows, KeyBuilder.prefixEnd(rows))) {
             while (it.next()) {
                 Object[] row = codec.decodeValue(it.value());
                 byte[] entry = codec.encodeIndexKey(index, row);
@@ -261,7 +275,7 @@ public final class Catalog {
             }
             throw new SwdbException(SqlStates.UNDEFINED_OBJECT, "index \"" + name + "\" does not exist");
         }
-        TableDef table = storeOf(tx.get(Keys.tableMeta(relation.get().tableId()))).table();
+        TableDef table = lockExclusive(tx, relation.get().tableId());
         IndexDef index = table.indexes().stream().filter(i -> i.name().equals(name)).findFirst().orElseThrow();
         deleteAll(tx, Keys.indexPrefix(table.id(), index.id()));
         tx.put(Keys.tableMeta(table.id()), toJson(table.withoutIndex(name)));
@@ -296,10 +310,29 @@ public final class Catalog {
         return new SwdbException(SqlStates.DUPLICATE_TABLE, "relation \"" + name + "\" already exists");
     }
 
-    /** Удаляет все ключи с этим префиксом: сначала собирает, чтобы не менять диапазон во время прохода. */
+    /**
+     * Исключительная блокировка таблицы для DDL, как {@code ACCESS EXCLUSIVE} в PostgreSQL: ждёт,
+     * пока все транзакции, работающие с таблицей ({@link #openTable}), не закончатся, и не пускает
+     * новые до конца этой транзакции.
+     * <p>
+     * Блокировка может достаться позже снимка транзакции, а пока она ждала, другие успели
+     * зафиксировать строки. Поэтому DDL под этой блокировкой читает строки и записи индексов
+     * не по снимку, а в последнем состоянии ({@link KvTransaction#scanLatest}): писать в таблицу
+     * сейчас всё равно никто не может.
+     *
+     * @return описание таблицы
+     */
+    private TableDef lockExclusive(KvTransaction tx, int tableId) {
+        return storeOf(tx.getForUpdate(Keys.tableMeta(tableId))).table();
+    }
+
+    /**
+     * Удаляет все ключи с этим префиксом (под {@link #lockExclusive}: в последнем состоянии).
+     * Сначала собирает, чтобы не менять диапазон во время прохода.
+     */
     private static void deleteAll(KvTransaction tx, byte[] prefix) {
         List<byte[]> keys = new ArrayList<>();
-        try (KvIterator it = tx.scan(prefix, KeyBuilder.prefixEnd(prefix))) {
+        try (KvIterator it = tx.scanLatest(prefix, KeyBuilder.prefixEnd(prefix))) {
             while (it.next()) {
                 keys.add(it.key());
             }

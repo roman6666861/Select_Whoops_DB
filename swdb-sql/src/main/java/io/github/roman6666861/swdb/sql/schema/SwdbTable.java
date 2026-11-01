@@ -59,10 +59,11 @@ final class SwdbTable extends AbstractQueryableTable implements ModifiableTable,
      * оператора живёт дольше DDL: после CREATE INDEX каталог заменяет {@link TableStore}, и запись
      * через старый оставила бы новый индекс без записей, а чтение через старый — искало бы
      * по удалённому индексу. Таблица, пересозданная с тем же именем, — уже другая таблица.
-     * Описание читается через транзакцию оператора, как его видит именно она.
+     * Описание читается через транзакцию оператора с разделяемой блокировкой таблицы
+     * ({@link Catalog#openTable}): пока транзакция не закончится, DDL этой таблицы ждёт.
      */
     TableStore store() {
-        return catalog.table(transaction.current(), table.name())
+        return catalog.openTable(transaction.current(), table.name())
                 .filter(store -> store.table().id() == table.id())
                 .orElseThrow(() -> new SwdbException(SqlStates.UNDEFINED_TABLE,
                         "relation \"" + table.name() + "\" does not exist"));
