@@ -24,10 +24,15 @@ public final class SessionTransaction {
         current = null;
     }
 
-    KvTransaction current() {
+    public KvTransaction current() {
         if (current == null) {
             throw new IllegalStateException("no active transaction");
         }
+        return current;
+    }
+
+    /** Текущая транзакция или {@code null}: оператор готовится заранее ({@code prepare}) вне BEGIN. */
+    KvTransaction currentOrNull() {
         return current;
     }
 }

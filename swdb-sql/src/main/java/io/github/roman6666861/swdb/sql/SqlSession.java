@@ -33,6 +33,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -119,15 +120,15 @@ public final class SqlSession implements AutoCloseable {
         Optional<IndexCommand> index = IndexCommand.parse(text);
         if (index.isPresent()) {
             return switch (index.get()) {
-                case IndexCommand.Create create -> ddl.createIndex(outsideTransaction(create, "CREATE INDEX"));
-                case IndexCommand.Drop drop -> ddl.dropIndex(outsideTransaction(drop, "DROP INDEX"));
+                case IndexCommand.Create create -> ddlStatement(() -> ddl.createIndex(outsideTransaction(create, "CREATE INDEX")));
+                case IndexCommand.Drop drop -> ddlStatement(() -> ddl.dropIndex(outsideTransaction(drop, "DROP INDEX")));
             };
         }
         // SET и DDL Calcite JDBC не выполняет: их обрабатываем сами, остальное отдаём Calcite.
         return switch (parse(text)) {
             case SqlSetOption set -> applySetting(set);
-            case SqlCreateTable create -> ddl.createTable(outsideTransaction(create));
-            case SqlDropTable drop -> ddl.dropTable(outsideTransaction(drop));
+            case SqlCreateTable create -> ddlStatement(() -> ddl.createTable(outsideTransaction(create)));
+            case SqlDropTable drop -> ddlStatement(() -> ddl.dropTable(outsideTransaction(drop)));
             case SqlExplain _ -> explain(text);
             case SqlCreate create -> throw unsupported(create.getOperator().getName());
             case SqlDrop drop -> throw unsupported(drop.getOperator().getName());
@@ -138,9 +139,14 @@ public final class SqlSession implements AutoCloseable {
     }
 
     /**
-     * DDL меняет каталог сразу, мимо транзакций, поэтому внутри блока BEGIN он запрещён:
-     * иначе ROLLBACK не отменил бы CREATE TABLE.
+     * DDL меняет каталог в транзакции оператора, как DML: при ошибке не остаётся ни описания,
+     * ни половины записей индекса.
      */
+    private StatementResult ddlStatement(Supplier<StatementResult> statement) {
+        return transactions.withTransaction(statement);
+    }
+
+    /** DDL внутри блока BEGIN пока запрещён. */
     private <T extends SqlNode> T outsideTransaction(T ddlStatement) {
         return outsideTransaction(ddlStatement, ddlStatement.getKind().sql.replace('_', ' '));
     }

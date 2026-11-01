@@ -3,6 +3,7 @@ package io.github.roman6666861.swdb.catalog;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.roman6666861.swdb.common.SqlStates;
 import io.github.roman6666861.swdb.common.SwdbException;
+import io.github.roman6666861.swdb.storage.KeyBuilder;
 import io.github.roman6666861.swdb.storage.KvIterator;
 import io.github.roman6666861.swdb.storage.KvStore;
 import io.github.roman6666861.swdb.storage.KvTransaction;
@@ -17,43 +18,109 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Function;
 
 /**
- * Каталог таблиц. Описания хранятся в том же RocksDB (ключи {@code 'M' 'T' [id]}) в виде JSON
- * и целиком загружаются в память при старте.
+ * Каталог таблиц и индексов. Описания хранятся в том же RocksDB (ключи {@code 'M' 'T' [id]})
+ * в виде JSON и читаются и меняются через транзакцию, как обычные данные. Поэтому транзакция
+ * видит каталог на момент своего снимка вместе со своими незафиксированными изменениями,
+ * а DDL откатывается вместе с остальной транзакцией.
  * <p>
- * DDL-операции сериализуются блокировкой каталога; чтение каталога не блокируется.
+ * Методы без транзакции выполняют операцию в своей транзакции и сразу её фиксируют,
+ * как оператор вне {@code BEGIN}.
  */
 public final class Catalog {
 
     private static final ObjectMapper JSON = new ObjectMapper();
+    private static final int TABLE = 'T';
+    private static final int INDEX = 'I';
+    /** Больше разных версий описаний кэш не держит: старые после DDL никому не нужны. */
+    private static final int MAX_CACHED = 1000;
 
     private final KvStore store;
-    private final Map<String, TableStore> tables = new ConcurrentHashMap<>();
-    private int nextTableId = 1; // guarded by this
+    /**
+     * Номера таблиц, как OID в PostgreSQL, выдаются вне транзакций: после ROLLBACK номер
+     * пропадает, зато двум одновременным транзакциям не достанется один и тот же.
+     */
+    private final AtomicInteger nextTableId = new AtomicInteger(1);
+    /** Разобранные описания по их байтам: JSON разбирается один раз на версию описания. */
+    private final Map<ByteBuffer, TableStore> stores = new ConcurrentHashMap<>();
 
-    public Catalog(KvStore store) {
-        this.store = store;
-        try (KvIterator it = store.scan(Keys.tableMetaPrefix())) {
-            while (it.next()) {
-                TableDef table = fromJson(it.value());
-                tables.put(table.name(), new TableStore(table));
-                nextTableId = Math.max(nextTableId, table.id() + 1);
-            }
+    /** Что называется этим именем: таблица или индекс, и какой таблицы. */
+    private record Relation(int kind, int tableId) {
+
+        byte[] encode() {
+            return new KeyBuilder().appendByte(kind).appendInt(tableId).build();
+        }
+
+        static Relation decode(byte[] value) {
+            ByteBuffer buffer = ByteBuffer.wrap(value);
+            return new Relation(buffer.get(), buffer.getInt() ^ Integer.MIN_VALUE);
         }
     }
 
+    public Catalog(KvStore store) {
+        this.store = store;
+        List<TableDef> tables = new ArrayList<>();
+        try (KvIterator it = store.scan(Keys.tableMetaPrefix())) {
+            while (it.next()) {
+                tables.add(fromJson(it.value()));
+            }
+        }
+        tables.forEach(table -> nextTableId.accumulateAndGet(table.id() + 1, Math::max));
+        // В базах, созданных до ключей имён, их нет: создаём по описаниям таблиц один раз.
+        store.write(batch -> {
+            for (TableDef table : tables) {
+                if (store.get(Keys.relationName(table.name())) == null) {
+                    batch.put(Keys.relationName(table.name()), new Relation(TABLE, table.id()).encode());
+                    for (IndexDef index : table.indexes()) {
+                        batch.put(Keys.relationName(index.name()), new Relation(INDEX, table.id()).encode());
+                    }
+                }
+            }
+        });
+    }
+
+    /** Транзакция для чтения и изменения строк таблиц и самого каталога. */
+    public KvTransaction begin() {
+        return store.begin();
+    }
+
+    /** Таблица, какой её видит транзакция. */
+    public Optional<TableStore> table(KvTransaction tx, String name) {
+        return relation(tx.get(Keys.relationName(name)))
+                .filter(relation -> relation.kind() == TABLE)
+                .map(relation -> storeOf(tx.get(Keys.tableMeta(relation.tableId()))));
+    }
+
+    /** Таблица в последнем зафиксированном состоянии каталога. */
     public Optional<TableStore> table(String name) {
-        return Optional.ofNullable(tables.get(name));
+        return autocommit(tx -> table(tx, name));
+    }
+
+    /** Все таблицы, какими их видит транзакция. */
+    public List<TableStore> tables(KvTransaction tx) {
+        byte[] prefix = Keys.tableMetaPrefix();
+        List<TableStore> result = new ArrayList<>();
+        try (KvIterator it = tx.scan(prefix, KeyBuilder.prefixEnd(prefix))) {
+            while (it.next()) {
+                result.add(storeOf(it.value()));
+            }
+        }
+        return result;
     }
 
     public List<TableStore> tables() {
-        return List.copyOf(tables.values());
+        return autocommit(this::tables);
     }
 
-    /** Транзакция для чтения и изменения строк таблиц. DDL выполняется вне транзакций. */
-    public KvTransaction begin() {
-        return store.begin();
+    /**
+     * Есть ли таблица или индекс с таким именем: в PostgreSQL у них общее пространство имён.
+     * Имя, которое создаёт другая, ещё не зафиксированная транзакция, не видно.
+     */
+    public boolean relationExists(KvTransaction tx, String name) {
+        return tx.get(Keys.relationName(name)) != null;
     }
 
     /**
@@ -61,85 +128,82 @@ public final class Catalog {
      *
      * @return {@code false}, если таблица уже есть и задан {@code ifNotExists}
      */
-    public synchronized boolean createTable(String name, List<ColumnDef> columns, List<String> primaryKey,
-                                            boolean ifNotExists) {
-        if (relationExists(name)) {
+    public boolean createTable(KvTransaction tx, String name, List<ColumnDef> columns, List<String> primaryKey,
+                               boolean ifNotExists) {
+        List<Integer> key = resolvePrimaryKey(name, columns, primaryKey);
+        byte[] nameKey = Keys.relationName(name);
+        if (tx.getForUpdate(nameKey) != null) {
             if (ifNotExists) {
                 return false;
             }
             throw relationAlreadyExists(name);
         }
-        TableDef table = new TableDef(nextTableId, name, columns, resolvePrimaryKey(name, columns, primaryKey));
-        List<ColumnDef> withNotNullKey = new ArrayList<>(table.columns());
-        for (int index : table.primaryKey()) {
+        List<ColumnDef> withNotNullKey = new ArrayList<>(columns);
+        for (int index : key) {
             withNotNullKey.set(index, withNotNullKey.get(index).withNullable(false));
         }
-        table = new TableDef(table.id(), name, withNotNullKey, table.primaryKey());
-
-        store.put(Keys.tableMeta(table.id()), toJson(table));
-        tables.put(name, new TableStore(table));
-        nextTableId++;
+        TableDef table = new TableDef(nextTableId.getAndIncrement(), name, withNotNullKey, key);
+        tx.put(Keys.tableMeta(table.id()), toJson(table));
+        tx.put(nameKey, new Relation(TABLE, table.id()).encode());
         return true;
     }
 
+    public boolean createTable(String name, List<ColumnDef> columns, List<String> primaryKey, boolean ifNotExists) {
+        return autocommit(tx -> createTable(tx, name, columns, primaryKey, ifNotExists));
+    }
+
     /**
-     * Удаляет таблицу вместе со всеми данными одной атомарной записью.
+     * Удаляет таблицу вместе со строками, индексами и их именами.
      *
      * @return {@code false}, если таблицы нет и задан {@code ifExists}
      */
-    public synchronized boolean dropTable(String name, boolean ifExists) {
-        TableStore existing = tables.get(name);
-        if (existing == null) {
+    public boolean dropTable(KvTransaction tx, String name, boolean ifExists) {
+        byte[] nameKey = Keys.relationName(name);
+        Optional<Relation> relation = relation(tx.getForUpdate(nameKey)).filter(r -> r.kind() == TABLE);
+        if (relation.isEmpty()) {
             if (ifExists) {
                 return false;
             }
             throw new SwdbException(SqlStates.UNDEFINED_TABLE, "table \"" + name + "\" does not exist");
         }
-        int id = existing.table().id();
-        // Удаления диапазона (deleteRange) TransactionDB не поддерживает: блокировки в нём
-        // ставятся на отдельные ключи. Поэтому строки удаляются по одной, но одним пакетом.
-        List<byte[]> keys = keys(Keys.dataPrefix(id));
-        for (IndexDef index : existing.table().indexes()) {
-            keys.addAll(keys(Keys.indexPrefix(id, index.id())));
+        TableDef table = storeOf(tx.get(Keys.tableMeta(relation.get().tableId()))).table();
+        // Удаления диапазона (deleteRange) в транзакции нет: строки удаляются по одной.
+        deleteAll(tx, Keys.dataPrefix(table.id()));
+        for (IndexDef index : table.indexes()) {
+            deleteAll(tx, Keys.indexPrefix(table.id(), index.id()));
+            tx.delete(Keys.relationName(index.name()));
         }
-        store.write(batch -> {
-            batch.delete(Keys.tableMeta(id));
-            keys.forEach(batch::delete);
-        });
-        tables.remove(name);
+        tx.delete(Keys.tableMeta(table.id()));
+        tx.delete(nameKey);
         return true;
+    }
+
+    public boolean dropTable(String name, boolean ifExists) {
+        return autocommit(tx -> dropTable(tx, name, ifExists));
     }
 
     /**
      * Создаёт индекс по колонкам таблицы и сразу заполняет его записями для уже существующих
-     * строк. Новое описание таблицы и все записи пишутся одним пакетом: после сбоя не останется
-     * индекса, заполненного наполовину.
+     * строк. Индекс может быть уникальным: если в таблице уже есть строки с одинаковыми
+     * значениями, он не создаётся.
      * <p>
      * Имена индексов и таблиц общие, как в PostgreSQL: индекс не может называться как таблица.
      *
      * @return {@code false}, если индекс или таблица с таким именем уже есть и задан {@code ifNotExists}
      */
-    public boolean createIndex(String tableName, String name, List<String> columns, boolean ifNotExists) {
-        return createIndex(tableName, name, columns, false, ifNotExists);
-    }
-
-    /**
-     * Как {@link #createIndex(String, String, List, boolean)}, но индекс может быть уникальным.
-     * Если в таблице уже есть строки с одинаковыми значениями, индекс не создаётся.
-     */
-    public synchronized boolean createIndex(String tableName, String name, List<String> columns, boolean unique,
-                                            boolean ifNotExists) {
-        if (relationExists(name)) {
+    public boolean createIndex(KvTransaction tx, String tableName, String name, List<String> columns,
+                               boolean unique, boolean ifNotExists) {
+        byte[] nameKey = Keys.relationName(name);
+        if (tx.getForUpdate(nameKey) != null) {
             if (ifNotExists) {
                 return false;
             }
             throw relationAlreadyExists(name);
         }
-        TableStore existing = tables.get(tableName);
-        if (existing == null) {
-            throw new SwdbException(SqlStates.UNDEFINED_TABLE, "relation \"" + tableName + "\" does not exist");
-        }
-        TableDef table = existing.table();
+        TableDef table = table(tx, tableName)
+                .orElseThrow(() -> new SwdbException(SqlStates.UNDEFINED_TABLE,
+                        "relation \"" + tableName + "\" does not exist"))
+                .table();
         List<Integer> indexColumns = new ArrayList<>(columns.size());
         for (String column : columns) {
             int index = indexOf(table.columns(), column);
@@ -154,74 +218,93 @@ public final class Catalog {
         TableDef withIndex = table.withIndex(index);
         RowCodec codec = new RowCodec(withIndex);
 
-        store.write(batch -> {
-            // Ключи уникальных записей: совпадение — две строки с одинаковыми значениями.
-            Set<ByteBuffer> uniqueEntries = new HashSet<>();
-            try (KvIterator it = store.scan(Keys.dataPrefix(table.id()))) {
-                while (it.next()) {
-                    Object[] row = codec.decodeValue(it.value());
-                    byte[] entry = codec.encodeIndexKey(index, row);
-                    if (codec.isUniqueEntry(index, row) && !uniqueEntries.add(ByteBuffer.wrap(entry))) {
-                        // Пакет ещё не записан: исключение отменяет и записи индекса, и описание.
-                        throw new SwdbException(SqlStates.UNIQUE_VIOLATION,
-                                "could not create unique index \"" + name + "\"");
-                    }
-                    batch.put(entry, it.key());
+        // Ключи уникальных записей: совпадение — две строки с одинаковыми значениями.
+        Set<ByteBuffer> uniqueEntries = new HashSet<>();
+        byte[] rows = Keys.dataPrefix(table.id());
+        try (KvIterator it = tx.scan(rows, KeyBuilder.prefixEnd(rows))) {
+            while (it.next()) {
+                Object[] row = codec.decodeValue(it.value());
+                byte[] entry = codec.encodeIndexKey(index, row);
+                if (codec.isUniqueEntry(index, row) && !uniqueEntries.add(ByteBuffer.wrap(entry))) {
+                    // Записи уже в транзакции, но её откатит тот, кто получит исключение.
+                    throw new SwdbException(SqlStates.UNIQUE_VIOLATION,
+                            "could not create unique index \"" + name + "\"");
                 }
+                tx.put(entry, it.key());
             }
-            batch.put(Keys.tableMeta(table.id()), toJson(withIndex));
-        });
-        tables.put(tableName, new TableStore(withIndex));
+        }
+        tx.put(Keys.tableMeta(table.id()), toJson(withIndex));
+        tx.put(nameKey, new Relation(INDEX, table.id()).encode());
         return true;
     }
 
+    public boolean createIndex(String tableName, String name, List<String> columns, boolean unique,
+                               boolean ifNotExists) {
+        return autocommit(tx -> createIndex(tx, tableName, name, columns, unique, ifNotExists));
+    }
+
+    public boolean createIndex(String tableName, String name, List<String> columns, boolean ifNotExists) {
+        return createIndex(tableName, name, columns, false, ifNotExists);
+    }
+
     /**
-     * Удаляет индекс вместе со всеми его записями одним пакетом.
+     * Удаляет индекс вместе со всеми его записями.
      *
      * @return {@code false}, если индекса нет и задан {@code ifExists}
      */
-    public synchronized boolean dropIndex(String name, boolean ifExists) {
-        for (TableStore existing : tables.values()) {
-            TableDef table = existing.table();
-            for (IndexDef index : table.indexes()) {
-                if (index.name().equals(name)) {
-                    TableDef withoutIndex = table.withoutIndex(name);
-                    List<byte[]> keys = keys(Keys.indexPrefix(table.id(), index.id()));
-                    store.write(batch -> {
-                        keys.forEach(batch::delete);
-                        batch.put(Keys.tableMeta(table.id()), toJson(withoutIndex));
-                    });
-                    tables.put(table.name(), new TableStore(withoutIndex));
-                    return true;
-                }
+    public boolean dropIndex(KvTransaction tx, String name, boolean ifExists) {
+        byte[] nameKey = Keys.relationName(name);
+        Optional<Relation> relation = relation(tx.getForUpdate(nameKey)).filter(r -> r.kind() == INDEX);
+        if (relation.isEmpty()) {
+            if (ifExists) {
+                return false;
             }
+            throw new SwdbException(SqlStates.UNDEFINED_OBJECT, "index \"" + name + "\" does not exist");
         }
-        if (ifExists) {
-            return false;
-        }
-        throw new SwdbException(SqlStates.UNDEFINED_OBJECT, "index \"" + name + "\" does not exist");
+        TableDef table = storeOf(tx.get(Keys.tableMeta(relation.get().tableId()))).table();
+        IndexDef index = table.indexes().stream().filter(i -> i.name().equals(name)).findFirst().orElseThrow();
+        deleteAll(tx, Keys.indexPrefix(table.id(), index.id()));
+        tx.put(Keys.tableMeta(table.id()), toJson(table.withoutIndex(name)));
+        tx.delete(nameKey);
+        return true;
     }
 
-    /** Есть ли таблица или индекс с таким именем: в PostgreSQL у них общее пространство имён. */
-    public boolean relationExists(String name) {
-        return tables.containsKey(name) || tables.values().stream()
-                .flatMap(table -> table.table().indexes().stream())
-                .anyMatch(index -> index.name().equals(name));
+    public boolean dropIndex(String name, boolean ifExists) {
+        return autocommit(tx -> dropIndex(tx, name, ifExists));
+    }
+
+    private <T> T autocommit(Function<KvTransaction, T> work) {
+        try (KvTransaction tx = begin()) {
+            T result = work.apply(tx);
+            tx.commit();
+            return result;
+        }
+    }
+
+    private static Optional<Relation> relation(byte[] value) {
+        return Optional.ofNullable(value).map(Relation::decode);
+    }
+
+    private TableStore storeOf(byte[] json) {
+        if (stores.size() > MAX_CACHED) {
+            stores.clear();
+        }
+        return stores.computeIfAbsent(ByteBuffer.wrap(json), key -> new TableStore(fromJson(json)));
     }
 
     private static SwdbException relationAlreadyExists(String name) {
         return new SwdbException(SqlStates.DUPLICATE_TABLE, "relation \"" + name + "\" already exists");
     }
 
-    /** Все ключи с этим префиксом. */
-    private List<byte[]> keys(byte[] prefix) {
+    /** Удаляет все ключи с этим префиксом: сначала собирает, чтобы не менять диапазон во время прохода. */
+    private static void deleteAll(KvTransaction tx, byte[] prefix) {
         List<byte[]> keys = new ArrayList<>();
-        try (KvIterator it = store.scan(prefix)) {
+        try (KvIterator it = tx.scan(prefix, KeyBuilder.prefixEnd(prefix))) {
             while (it.next()) {
                 keys.add(it.key());
             }
         }
-        return keys;
+        keys.forEach(tx::delete);
     }
 
     private static List<Integer> resolvePrimaryKey(String table, List<ColumnDef> columns, List<String> primaryKey) {

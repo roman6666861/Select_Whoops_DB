@@ -4,6 +4,7 @@ import io.github.roman6666861.swdb.catalog.Catalog;
 import io.github.roman6666861.swdb.catalog.ColumnDef;
 import io.github.roman6666861.swdb.common.SqlStates;
 import io.github.roman6666861.swdb.common.SwdbException;
+import io.github.roman6666861.swdb.sql.schema.SessionTransaction;
 import io.github.roman6666861.swdb.sql.schema.SwdbSchema;
 import io.github.roman6666861.swdb.sql.schema.TypeMapping;
 import org.apache.calcite.sql.SqlIdentifier;
@@ -25,9 +26,12 @@ import java.util.List;
 final class DdlExecutor {
 
     private final Catalog catalog;
+    private final SessionTransaction transaction;
 
-    DdlExecutor(Catalog catalog) {
+    /** @param transaction транзакция сессии, в которой выполняется DDL-оператор */
+    DdlExecutor(Catalog catalog, SessionTransaction transaction) {
         this.catalog = catalog;
+        this.transaction = transaction;
     }
 
     StatementResult createTable(SqlCreateTable create) {
@@ -62,23 +66,24 @@ final class DdlExecutor {
                 default -> throw unsupported("constraint " + element);
             }
         }
-        catalog.createTable(tableName(create.name), columns, primaryKey, create.ifNotExists);
+        catalog.createTable(transaction.current(), tableName(create.name), columns, primaryKey, create.ifNotExists);
         return new StatementResult.Update("CREATE TABLE", 0);
     }
 
     StatementResult dropTable(SqlDropTable drop) {
-        catalog.dropTable(tableName(drop.name), drop.ifExists);
+        catalog.dropTable(transaction.current(), tableName(drop.name), drop.ifExists);
         return new StatementResult.Update("DROP TABLE", 0);
     }
 
     StatementResult createIndex(IndexCommand.Create create) {
         String name = create.name() != null ? create.name() : defaultIndexName(create.table(), create.columns());
-        catalog.createIndex(create.table(), name, create.columns(), create.unique(), create.ifNotExists());
+        catalog.createIndex(transaction.current(), create.table(), name, create.columns(), create.unique(),
+                create.ifNotExists());
         return new StatementResult.Update("CREATE INDEX", 0);
     }
 
     StatementResult dropIndex(IndexCommand.Drop drop) {
-        catalog.dropIndex(drop.name(), drop.ifExists());
+        catalog.dropIndex(transaction.current(), drop.name(), drop.ifExists());
         return new StatementResult.Update("DROP INDEX", 0);
     }
 
@@ -86,7 +91,7 @@ final class DdlExecutor {
     private String defaultIndexName(String table, List<String> columns) {
         String base = table + "_" + String.join("_", columns) + "_idx";
         String name = base;
-        for (int i = 1; catalog.relationExists(name); i++) {
+        for (int i = 1; catalog.relationExists(transaction.current(), name); i++) {
             name = base + i;
         }
         return name;

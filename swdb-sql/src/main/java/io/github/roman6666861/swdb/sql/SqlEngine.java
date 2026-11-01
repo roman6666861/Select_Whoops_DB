@@ -46,7 +46,7 @@ public final class SqlEngine {
             // Без кэша Calcite спрашивает список таблиц у схемы при каждом запросе и видит свежий DDL.
             schema.setCacheEnabled(false);
             connection.setSchema(SwdbSchema.NAME);
-            return new SqlSession(connection, parserConfig, new DdlExecutor(catalog), catalog, transaction);
+            return new SqlSession(connection, parserConfig, new DdlExecutor(catalog, transaction), catalog, transaction);
         } catch (SQLException e) {
             throw new SwdbException(SqlStates.INTERNAL_ERROR, "cannot open SQL session: " + e.getMessage(), e);
         }

@@ -12,6 +12,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.math.BigDecimal;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -232,6 +233,86 @@ class CatalogTest {
         assertThatThrownBy(() -> catalog.createIndex("users", "i", List.of("nope"), false))
                 .satisfies(e -> assertSqlState(e, SqlStates.UNDEFINED_COLUMN));
         assertThat(catalog.table("users").orElseThrow().table().indexes()).hasSize(1);
+    }
+
+    @Test
+    void ddlIsVisibleToOthersOnlyAfterCommit() {
+        try (KvTransaction ddl = catalog.begin()) {
+            catalog.createTable(ddl, "users", USERS, List.of("id"), false);
+            catalog.createIndex(ddl, "users", "users_name", List.of("name"), false, false);
+
+            assertThat(catalog.table(ddl, "users")).as("своя транзакция видит").isPresent();
+            assertThat(catalog.relationExists(ddl, "users_name")).isTrue();
+            assertThat(catalog.table("users")).as("другие — нет").isEmpty();
+            assertThat(catalog.tables()).isEmpty();
+
+            ddl.commit();
+        }
+        assertThat(catalog.table("users").orElseThrow().table().indexes()).extracting(IndexDef::name)
+                .containsExactly("users_name");
+    }
+
+    @Test
+    void rollbackUndoesDdl() {
+        catalog.createTable("users", USERS, List.of("id"), false);
+        insert(catalog.table("users").orElseThrow(), new Object[]{1, "ann", null});
+        try (KvTransaction ddl = catalog.begin()) {
+            catalog.createIndex(ddl, "users", "users_name", List.of("name"), false, false);
+            catalog.createTable(ddl, "other", USERS, List.of("id"), false);
+            catalog.dropTable(ddl, "users", false);
+            assertThat(catalog.tables(ddl)).extracting(t -> t.table().name()).containsExactly("other");
+            ddl.rollback();
+        }
+
+        TableStore users = catalog.table("users").orElseThrow();
+        assertThat(users.table().indexes()).isEmpty();
+        assertThat(rows(users)).containsExactly(new Object[]{1, "ann", null});
+        assertThat(catalog.table("other")).isEmpty();
+        try (KvTransaction tx = catalog.begin()) {
+            assertThat(catalog.relationExists(tx, "users_name")).isFalse();
+        }
+        assertThat(entries(users.table().id(), 1)).as("записи индекса откатились").isEmpty();
+    }
+
+    @Test
+    void sameNameInTwoTransactionsConflicts() {
+        try (KvTransaction first = catalog.begin(); KvTransaction second = store.begin(Duration.ofMillis(100))) {
+            catalog.createTable(first, "t", USERS, List.of("id"), false);
+
+            // Имени ещё нет в базе, но его ключ заблокирован первой транзакцией.
+            assertThatThrownBy(() -> catalog.createTable(second, "t", USERS, List.of("id"), false))
+                    .satisfies(e -> assertSqlState(e, SqlStates.LOCK_NOT_AVAILABLE));
+            first.commit();
+        }
+        assertThat(catalog.createTable("t", USERS, List.of("id"), true)).isFalse();
+    }
+
+    @Test
+    void concurrentTablesGetDifferentIds() {
+        try (KvTransaction first = catalog.begin(); KvTransaction second = catalog.begin()) {
+            catalog.createTable(first, "a", USERS, List.of("id"), false);
+            catalog.createTable(second, "b", USERS, List.of("id"), false);
+            first.commit();
+            second.commit();
+        }
+        assertThat(catalog.table("a").orElseThrow().table().id())
+                .isNotEqualTo(catalog.table("b").orElseThrow().table().id());
+    }
+
+    @Test
+    void namesAreRestoredForDatabaseWithoutNameKeys() {
+        catalog.createTable("users", USERS, List.of("id"), false);
+        catalog.createIndex("users", "users_name", List.of("name"), false);
+        // Так выглядит база, созданная до ключей имён: описания есть, имён нет.
+        store.delete(Keys.relationName("users"));
+        store.delete(Keys.relationName("users_name"));
+
+        catalog = new Catalog(store);
+
+        assertThat(catalog.table("users")).isPresent();
+        assertThatThrownBy(() -> catalog.createTable("users_name", USERS, List.of("id"), false))
+                .satisfies(e -> assertSqlState(e, SqlStates.DUPLICATE_TABLE));
+        assertThat(catalog.dropIndex("users_name", false)).isTrue();
     }
 
     /** Записи индекса как пары {ключ, значение}. */
