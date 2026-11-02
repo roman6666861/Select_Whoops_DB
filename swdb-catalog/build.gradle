@@ -3,7 +3,7 @@ plugins {
 }
 
 dependencies {
-    api project(':swdb-txn')
+    api project(':swdb-storage')
     implementation platform(libs.jackson.bom)
     implementation libs.jackson.databind
 }

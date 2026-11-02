@@ -13,7 +13,6 @@ dependencyResolutionManagement {
 
 include 'swdb-common',
         'swdb-storage',
-        'swdb-txn',
         'swdb-catalog',
         'swdb-sql',
         'swdb-server',

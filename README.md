@@ -56,8 +56,7 @@ DROP TABLE IF EXISTS employees;
 | Модуль | Назначение |
 |---|---|
 | `swdb-common` | общие типы и исключения |
-| `swdb-storage` | key-value хранилище на RocksDB |
-| `swdb-txn` | транзакции |
+| `swdb-storage` | key-value хранилище на RocksDB, транзакции и блокировки |
 | `swdb-catalog` | каталог: схемы, таблицы, индексы |
 | `swdb-sql` | разбор, оптимизация и выполнение SQL на Apache Calcite |
 | `swdb-server` | сервер: протокол PostgreSQL на Netty, точка входа |
