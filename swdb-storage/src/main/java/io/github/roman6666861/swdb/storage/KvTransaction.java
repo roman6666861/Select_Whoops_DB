@@ -110,6 +110,36 @@ public final class KvTransaction implements AutoCloseable {
         return new KvIterator(transaction.getIterator(read), from, to, read);
     }
 
+    /**
+     * Берёт новый снимок: дальнейшие чтения видят всё, что зафиксировано к этому моменту,
+     * а проверка конфликтов при записи сравнивает ключи уже с ним. Собственные изменения
+     * транзакции остаются. На этом держится READ COMMITTED: свой снимок у каждого оператора.
+     */
+    public void refreshSnapshot() {
+        transaction.setSnapshot();
+    }
+
+    /**
+     * Запоминает состояние транзакции для {@link #rollbackToSavepoint}. Точек может быть
+     * несколько; снять точку можно только откатом к ней.
+     */
+    public void setSavepoint() {
+        try {
+            transaction.setSavePoint();
+        } catch (RocksDBException e) {
+            throw error("setSavePoint", e);
+        }
+    }
+
+    /** Отменяет изменения после последней {@link #setSavepoint точки сохранения} и снимает её. */
+    public void rollbackToSavepoint() {
+        try {
+            transaction.rollbackToSavePoint();
+        } catch (RocksDBException e) {
+            throw error("rollbackToSavePoint", e);
+        }
+    }
+
     public void commit() {
         finish();
         try {

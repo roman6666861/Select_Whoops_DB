@@ -240,6 +240,76 @@ class KvTransactionTest {
         }
     }
 
+    @Test
+    void refreshedSnapshotSeesLaterCommitsAndKeepsOwnChanges() {
+        try (KvTransaction tx = store.begin()) {
+            tx.put(bytes("own"), bytes("1"));
+            try (KvTransaction other = store.begin()) {
+                other.put(bytes("k"), bytes("v"));
+                other.commit();
+            }
+            assertThat(tx.get(bytes("k"))).as("старый снимок").isNull();
+
+            tx.refreshSnapshot();
+
+            assertThat(tx.get(bytes("k"))).isEqualTo(bytes("v"));
+            assertThat(keys(tx.scan(bytes("a"), null))).containsExactly("k", "own");
+        }
+    }
+
+    @Test
+    void refreshedSnapshotAcceptsWritesCommittedBeforeIt() {
+        store.put(bytes("k"), bytes("1"));
+        try (KvTransaction tx = store.begin()) {
+            try (KvTransaction other = store.begin()) {
+                other.put(bytes("k"), bytes("2"));
+                other.commit();
+            }
+            // По старому снимку это потерянное обновление (40001); по новому — значение 2 уже видно.
+            tx.refreshSnapshot();
+            tx.put(bytes("k"), bytes("3"));
+            tx.commit();
+        }
+        assertThat(store.get(bytes("k"))).isEqualTo(bytes("3"));
+    }
+
+    @Test
+    void rollbackToSavepointUndoesOnlyLaterChanges() {
+        store.put(bytes("old"), bytes("1"));
+        try (KvTransaction tx = store.begin()) {
+            tx.put(bytes("a"), bytes("1"));
+            tx.setSavepoint();
+            tx.put(bytes("b"), bytes("1"));
+            tx.setSavepoint();
+            tx.put(bytes("c"), bytes("1"));
+            tx.delete(bytes("old"));
+
+            tx.rollbackToSavepoint(); // отменяет c и удаление old
+            assertThat(keys(tx.scan(bytes("a"), null))).containsExactly("a", "b", "old");
+            tx.rollbackToSavepoint(); // отменяет b
+            assertThat(keys(tx.scan(bytes("a"), null))).containsExactly("a", "old");
+            tx.commit();
+        }
+        assertThat(store.get(bytes("a"))).isEqualTo(bytes("1"));
+        assertThat(store.get(bytes("b"))).isNull();
+    }
+
+    @Test
+    void rollbackToSavepointReleasesOnlyLocksTakenAfterIt() {
+        try (KvTransaction tx = store.begin(); KvTransaction other = store.begin(Duration.ofMillis(100))) {
+            tx.put(bytes("before"), bytes("1"));
+            tx.setSavepoint();
+            tx.put(bytes("after"), bytes("1"));
+            tx.put(bytes("before"), bytes("2"));
+
+            tx.rollbackToSavepoint();
+
+            other.put(bytes("after"), bytes("x")); // свободен: взят после точки
+            assertSqlState(() -> other.put(bytes("before"), bytes("x")), SqlStates.LOCK_NOT_AVAILABLE);
+            assertThat(tx.get(bytes("before"))).isEqualTo(bytes("1"));
+        }
+    }
+
     private static void assertSqlState(Runnable action, String sqlState) {
         assertThatThrownBy(action::run)
                 .isInstanceOfSatisfying(SwdbException.class, e -> assertThat(e.sqlState()).isEqualTo(sqlState));
