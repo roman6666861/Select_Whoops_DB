@@ -23,6 +23,9 @@ import java.util.function.Supplier;
  */
 final class TransactionBlock {
 
+    /** Сколько раз выполнять оператор вне BEGIN, пока он получает {@code 40001}. */
+    static final int MAX_ATTEMPTS = 5;
+
     private final Catalog catalog;
     private final SessionTransaction current;
     private KvTransaction open;
@@ -95,18 +98,31 @@ final class TransactionBlock {
     /**
      * Чтение или изменение данных: внутри блока — в его транзакции, иначе — в своей,
      * которая фиксируется, если оператор выполнился без ошибок.
+     * <p>
+     * Вне блока оператор при {@code 40001} выполняется ещё раз в новой транзакции со свежим снимком.
+     * Так оператор, ждавший DDL или чужую запись той же строки, видит их результат, как в PostgreSQL
+     * (там каждый оператор вне BEGIN получает новый снимок), а не просит клиента повторить.
+     * Это безопасно: изменения неудачной попытки откатаны, а результат ещё не ушёл клиенту —
+     * {@link StatementResult} собирается целиком до возврата. Внутри блока так нельзя:
+     * повтор одного оператора не повторил бы предыдущие, и транзакция видела бы разные снимки.
      */
     <T> T withTransaction(Supplier<T> work) {
         if (open != null) {
             return work.get();
         }
-        try (KvTransaction tx = catalog.begin()) {
-            current.set(tx);
-            T result = work.get();
-            tx.commit();
-            return result;
-        } finally {
-            current.clear();
+        for (int attempt = 1; ; attempt++) {
+            try (KvTransaction tx = catalog.begin()) {
+                current.set(tx);
+                T result = work.get();
+                tx.commit();
+                return result;
+            } catch (SwdbException e) {
+                if (!e.sqlState().equals(SqlStates.SERIALIZATION_FAILURE) || attempt == MAX_ATTEMPTS) {
+                    throw e;
+                }
+            } finally {
+                current.clear();
+            }
         }
     }
 

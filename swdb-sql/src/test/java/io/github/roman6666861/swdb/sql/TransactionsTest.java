@@ -143,6 +143,39 @@ class TransactionsTest {
     }
 
     @Test
+    void statementOutsideBlockIsRetriedAfterConcurrentUpdate() throws Exception {
+        first.execute("BEGIN");
+        first.execute("UPDATE t SET v = v + 1 WHERE id = 1");
+
+        // Вне BEGIN: ждёт строку, после COMMIT first получает 40001 и выполняется заново.
+        CompletableFuture<StatementResult> waiting =
+                CompletableFuture.supplyAsync(() -> second.execute("UPDATE t SET v = v + 1 WHERE id = 1"));
+        Thread.sleep(200);
+        assertThat(waiting).isNotDone();
+
+        first.execute("COMMIT");
+
+        assertThat(waiting.get(5, TimeUnit.SECONDS)).isEqualTo(new StatementResult.Update("UPDATE", 1));
+        assertThat(rows(first, "SELECT v FROM t")).as("оба прибавления на месте").containsExactly(List.of(12));
+    }
+
+    @Test
+    void concurrentInsertOfSameKeyOutsideBlockIsUniqueViolation() throws Exception {
+        first.execute("BEGIN");
+        first.execute("INSERT INTO t VALUES (2, 20)");
+
+        CompletableFuture<StatementResult> waiting =
+                CompletableFuture.supplyAsync(() -> second.execute("INSERT INTO t VALUES (2, 99)"));
+        Thread.sleep(200);
+        first.execute("COMMIT");
+
+        // Повтор видит строку first: ошибка про ключ, а не «повторите транзакцию».
+        assertThat(waiting).failsWithin(5, TimeUnit.SECONDS).withThrowableThat()
+                .havingCause().isInstanceOfSatisfying(SwdbException.class,
+                        e -> assertThat(e.sqlState()).isEqualTo(SqlStates.UNIQUE_VIOLATION));
+    }
+
+    @Test
     void rollbackUndoesCreateTable() {
         first.execute("BEGIN");
         assertThat(first.execute("CREATE TABLE u (id INT PRIMARY KEY, v INT)"))

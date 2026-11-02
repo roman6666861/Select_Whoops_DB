@@ -103,15 +103,30 @@ class DdlConcurrencyTest {
         assertThat(insert).as("ждёт DROP TABLE").isNotDone();
 
         second.execute("COMMIT");
-        // Описание таблицы удалено после снимка INSERT — повторить оператор.
+        // Снимок INSERT старше DROP TABLE (40001), но вне BEGIN оператор повторяется со свежим
+        // снимком — и видит, что таблицы больше нет, как в PostgreSQL.
         assertThat(insert).failsWithin(5, TimeUnit.SECONDS).withThrowableThat()
                 .havingCause().isInstanceOfSatisfying(SwdbException.class,
-                        e -> assertThat(e.sqlState()).isEqualTo(SqlStates.SERIALIZATION_FAILURE));
-        assertThatThrownBy(() -> first.execute("INSERT INTO users VALUES (3, 'c@x')"))
-                .isInstanceOfSatisfying(SwdbException.class,
                         e -> assertThat(e.sqlState()).isEqualTo(SqlStates.UNDEFINED_TABLE));
         assertThat(keys(new KeyBuilder().appendByte('D').appendInt(tableId).build()))
                 .as("строк-сирот нет").isZero();
+    }
+
+    @Test
+    void writerWaitingForCreateIndexIsRetriedAndIndexed() throws Exception {
+        second.execute("BEGIN");
+        second.execute("CREATE INDEX users_email ON users (email)");
+
+        CompletableFuture<StatementResult> insert =
+                CompletableFuture.supplyAsync(() -> first.execute("INSERT INTO users VALUES (2, 'bob@x')"));
+        Thread.sleep(300);
+        assertThat(insert).as("ждёт CREATE INDEX").isNotDone();
+
+        second.execute("COMMIT");
+        // Повтор видит новое описание с индексом и добавляет в индекс и свою строку.
+        assertThat(insert.get(5, TimeUnit.SECONDS)).isEqualTo(new StatementResult.Update("INSERT", 1));
+        assertThat(rows(first, "SELECT id FROM users WHERE email = 'bob@x'")).containsExactly(List.of(2));
+        assertThat(indexEntries()).isEqualTo(2);
     }
 
     @Test
