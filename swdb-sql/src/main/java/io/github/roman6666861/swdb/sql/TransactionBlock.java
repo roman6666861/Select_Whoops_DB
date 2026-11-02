@@ -39,11 +39,6 @@ final class TransactionBlock {
                 : TransactionStatus.IDLE;
     }
 
-    /** Внутри ли явного блока {@code BEGIN ... COMMIT}. */
-    boolean isOpen() {
-        return open != null;
-    }
-
     StatementResult execute(TransactionCommand command) {
         return switch (command) {
             case BEGIN -> {

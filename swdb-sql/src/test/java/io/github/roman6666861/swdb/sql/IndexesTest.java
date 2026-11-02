@@ -260,13 +260,17 @@ class IndexesTest {
     }
 
     @Test
-    void indexDdlIsRejectedInsideTransactionBlock() {
+    void rollbackUndoesIndexDdl() {
+        session.execute("CREATE INDEX users_email ON users (email)");
         session.execute("BEGIN");
-
-        assertSqlState("CREATE INDEX i ON users (age)", SqlStates.FEATURE_NOT_SUPPORTED);
+        session.execute("CREATE INDEX users_age ON users (age)");
+        session.execute("DROP INDEX users_email");
+        assertThat(rows("SELECT id FROM users WHERE age = 30")).containsExactly(List.of(1));
 
         session.execute("ROLLBACK");
-        assertThat(indexes()).isEmpty();
+
+        assertThat(indexes()).extracting(IndexDef::name).containsExactly("users_email");
+        assertThat(entries("users_email")).isEqualTo(2);
     }
 
     private List<List<Object>> rows(String sql) {

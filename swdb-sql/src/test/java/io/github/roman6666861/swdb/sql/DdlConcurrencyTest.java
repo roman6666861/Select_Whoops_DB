@@ -92,21 +92,19 @@ class DdlConcurrencyTest {
         int tableId = catalog.table("users").orElseThrow().table().id();
 
         // DROP TABLE в ещё не зафиксированной транзакции держит исключительную блокировку.
-        // (Через SQL так пока не получить: внутри BEGIN DDL запрещён.)
-        try (var dropTx = catalog.begin()) {
-            catalog.dropTable(dropTx, "users", false);
+        second.execute("BEGIN");
+        second.execute("DROP TABLE users");
 
-            CompletableFuture<StatementResult> insert =
-                    CompletableFuture.supplyAsync(() -> first.execute("INSERT INTO users VALUES (3, 'c@x')"));
-            Thread.sleep(300);
-            assertThat(insert).as("ждёт DROP TABLE").isNotDone();
+        CompletableFuture<StatementResult> insert =
+                CompletableFuture.supplyAsync(() -> first.execute("INSERT INTO users VALUES (3, 'c@x')"));
+        Thread.sleep(300);
+        assertThat(insert).as("ждёт DROP TABLE").isNotDone();
 
-            dropTx.commit();
-            // Описание таблицы удалено после снимка INSERT — повторить оператор.
-            assertThat(insert).failsWithin(5, TimeUnit.SECONDS).withThrowableThat()
-                    .havingCause().isInstanceOfSatisfying(SwdbException.class,
-                            e -> assertThat(e.sqlState()).isEqualTo(SqlStates.SERIALIZATION_FAILURE));
-        }
+        second.execute("COMMIT");
+        // Описание таблицы удалено после снимка INSERT — повторить оператор.
+        assertThat(insert).failsWithin(5, TimeUnit.SECONDS).withThrowableThat()
+                .havingCause().isInstanceOfSatisfying(SwdbException.class,
+                        e -> assertThat(e.sqlState()).isEqualTo(SqlStates.SERIALIZATION_FAILURE));
         assertThatThrownBy(() -> first.execute("INSERT INTO users VALUES (3, 'c@x')"))
                 .isInstanceOfSatisfying(SwdbException.class,
                         e -> assertThat(e.sqlState()).isEqualTo(SqlStates.UNDEFINED_TABLE));

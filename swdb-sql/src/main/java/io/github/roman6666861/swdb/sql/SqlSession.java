@@ -120,15 +120,15 @@ public final class SqlSession implements AutoCloseable {
         Optional<IndexCommand> index = IndexCommand.parse(text);
         if (index.isPresent()) {
             return switch (index.get()) {
-                case IndexCommand.Create create -> ddlStatement(() -> ddl.createIndex(outsideTransaction(create, "CREATE INDEX")));
-                case IndexCommand.Drop drop -> ddlStatement(() -> ddl.dropIndex(outsideTransaction(drop, "DROP INDEX")));
+                case IndexCommand.Create create -> ddlStatement(() -> ddl.createIndex(create));
+                case IndexCommand.Drop drop -> ddlStatement(() -> ddl.dropIndex(drop));
             };
         }
         // SET и DDL Calcite JDBC не выполняет: их обрабатываем сами, остальное отдаём Calcite.
         return switch (parse(text)) {
             case SqlSetOption set -> applySetting(set);
-            case SqlCreateTable create -> ddlStatement(() -> ddl.createTable(outsideTransaction(create)));
-            case SqlDropTable drop -> ddlStatement(() -> ddl.dropTable(outsideTransaction(drop)));
+            case SqlCreateTable create -> ddlStatement(() -> ddl.createTable(create));
+            case SqlDropTable drop -> ddlStatement(() -> ddl.dropTable(drop));
             case SqlExplain _ -> explain(text);
             case SqlCreate create -> throw unsupported(create.getOperator().getName());
             case SqlDrop drop -> throw unsupported(drop.getOperator().getName());
@@ -139,23 +139,12 @@ public final class SqlSession implements AutoCloseable {
     }
 
     /**
-     * DDL меняет каталог в транзакции оператора, как DML: при ошибке не остаётся ни описания,
-     * ни половины записей индекса.
+     * DDL меняет каталог в транзакции, как DML: вне BEGIN — в своей, внутри — в транзакции блока,
+     * и ROLLBACK отменяет его вместе с остальными изменениями. При ошибке не остаётся
+     * ни описания, ни половины записей индекса.
      */
     private StatementResult ddlStatement(Supplier<StatementResult> statement) {
         return transactions.withTransaction(statement);
-    }
-
-    /** DDL внутри блока BEGIN пока запрещён. */
-    private <T extends SqlNode> T outsideTransaction(T ddlStatement) {
-        return outsideTransaction(ddlStatement, ddlStatement.getKind().sql.replace('_', ' '));
-    }
-
-    private <T> T outsideTransaction(T ddlStatement, String name) {
-        if (transactions.isOpen()) {
-            throw unsupported(name + " inside a transaction block");
-        }
-        return ddlStatement;
     }
 
     /**

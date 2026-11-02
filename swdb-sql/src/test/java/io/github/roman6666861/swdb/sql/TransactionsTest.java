@@ -143,14 +143,82 @@ class TransactionsTest {
     }
 
     @Test
-    void ddlIsNotAllowedInsideTransaction() {
+    void rollbackUndoesCreateTable() {
         first.execute("BEGIN");
+        assertThat(first.execute("CREATE TABLE u (id INT PRIMARY KEY, v INT)"))
+                .isEqualTo(new StatementResult.Update("CREATE TABLE", 0));
+        first.execute("INSERT INTO u VALUES (1, 10)");
+        assertThat(rows(first, "SELECT v FROM u")).containsExactly(List.of(10));
 
-        assertSqlState(() -> first.execute("CREATE TABLE u (id INT PRIMARY KEY)"), SqlStates.FEATURE_NOT_SUPPORTED);
-        assertThat(first.transactionStatus()).isEqualTo(TransactionStatus.FAILED);
         first.execute("ROLLBACK");
 
-        first.execute("DROP TABLE t"); // вне транзакции DDL работает
+        assertSqlState(() -> first.execute("SELECT v FROM u"), SqlStates.UNDEFINED_TABLE);
+        first.execute("CREATE TABLE u (id INT PRIMARY KEY)"); // имя снова свободно
+    }
+
+    @Test
+    void committedCreateTableKeepsRows() {
+        first.execute("BEGIN");
+        first.execute("CREATE TABLE u (id INT PRIMARY KEY, v INT)");
+        first.execute("INSERT INTO u VALUES (1, 10)");
+        first.execute("COMMIT");
+
+        assertThat(rows(second, "SELECT v FROM u")).containsExactly(List.of(10));
+    }
+
+    @Test
+    void uncommittedTableIsInvisibleAndItsNameIsLocked() throws Exception {
+        first.execute("BEGIN");
+        first.execute("CREATE TABLE u (id INT PRIMARY KEY)");
+
+        assertSqlState(() -> second.execute("SELECT id FROM u"), SqlStates.UNDEFINED_TABLE);
+        CompletableFuture<StatementResult> sameName =
+                CompletableFuture.supplyAsync(() -> second.execute("CREATE TABLE u (id INT PRIMARY KEY)"));
+        Thread.sleep(300);
+        assertThat(sameName).as("ждёт, чем закончится первая транзакция").isNotDone();
+
+        first.execute("ROLLBACK");
+        // Первая не создала таблицу — имя свободно, вторая её создаёт.
+        assertThat(sameName.get(5, TimeUnit.SECONDS)).isEqualTo(new StatementResult.Update("CREATE TABLE", 0));
+    }
+
+    @Test
+    void indexCreatedInTransactionContainsItsOwnRows() {
+        first.execute("BEGIN");
+        first.execute("INSERT INTO t VALUES (2, 20)");
+        first.execute("CREATE INDEX t_v ON t (v)");
+        first.execute("INSERT INTO t VALUES (3, 30)");
+
+        // Строки 1 (зафиксирована раньше), 2 (до индекса) и 3 (после) — все в индексе.
+        assertThat(rows(first, "SELECT id FROM t WHERE v >= 10 ORDER BY id"))
+                .containsExactly(List.of(1), List.of(2), List.of(3));
+        first.execute("COMMIT");
+        assertThat(rows(second, "SELECT id FROM t WHERE v = 20")).containsExactly(List.of(2));
+    }
+
+    @Test
+    void rollbackRestoresDroppedTable() {
+        first.execute("CREATE INDEX t_v ON t (v)");
+        first.execute("BEGIN");
+        first.execute("DROP TABLE t");
+        assertSqlState(() -> first.execute("SELECT id FROM t"), SqlStates.UNDEFINED_TABLE);
+        first.execute("ROLLBACK"); // ошибка сломала транзакцию, ROLLBACK завершает её
+
+        assertThat(ids(first)).containsExactly(1);
+        assertThat(rows(first, "SELECT id FROM t WHERE v = 10")).containsExactly(List.of(1));
+    }
+
+    @Test
+    void failedDdlBreaksTransaction() {
+        first.execute("BEGIN");
+        first.execute("INSERT INTO t VALUES (2, 10)");
+
+        assertSqlState(() -> first.execute("CREATE UNIQUE INDEX t_v ON t (v)"), SqlStates.UNIQUE_VIOLATION);
+        assertThat(first.transactionStatus()).isEqualTo(TransactionStatus.FAILED);
+        assertSqlState(() -> first.execute("SELECT id FROM t"), SqlStates.IN_FAILED_SQL_TRANSACTION);
+        first.execute("ROLLBACK");
+
+        assertThat(ids(first)).as("INSERT до ошибки тоже откатился").containsExactly(1);
     }
 
     @Test
