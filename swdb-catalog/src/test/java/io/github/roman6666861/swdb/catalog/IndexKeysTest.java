@@ -118,7 +118,8 @@ class IndexKeysTest {
         try (KvStore store = KvStore.open(dir)) {
             store.put(Keys.tableMeta(1), old.getBytes(StandardCharsets.UTF_8));
 
-            TableDef table = new Catalog(store).table("t").orElseThrow().table();
+            Catalog catalog = new Catalog(store);
+            TableDef table = new Autocommit(() -> catalog).table("t").orElseThrow().table();
 
             assertThat(table.indexes()).isEmpty();
             assertThat(table.primaryKey()).containsExactly(0);

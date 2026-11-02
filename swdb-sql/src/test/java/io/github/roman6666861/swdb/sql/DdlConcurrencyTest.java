@@ -1,11 +1,13 @@
 package io.github.roman6666861.swdb.sql;
 
 import io.github.roman6666861.swdb.catalog.Catalog;
+import io.github.roman6666861.swdb.catalog.TableDef;
 import io.github.roman6666861.swdb.common.SqlStates;
 import io.github.roman6666861.swdb.common.SwdbException;
 import io.github.roman6666861.swdb.storage.KeyBuilder;
 import io.github.roman6666861.swdb.storage.KvIterator;
 import io.github.roman6666861.swdb.storage.KvStore;
+import io.github.roman6666861.swdb.storage.KvTransaction;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -84,12 +86,12 @@ class DdlConcurrencyTest {
 
         first.execute("COMMIT");
         dropIndex.get(5, TimeUnit.SECONDS);
-        assertThat(catalog.table("users").orElseThrow().table().indexes()).isEmpty();
+        assertThat(users().indexes()).isEmpty();
     }
 
     @Test
     void writerWaitsForDropTableAndLeavesNoRows() throws Exception {
-        int tableId = catalog.table("users").orElseThrow().table().id();
+        int tableId = users().id();
 
         // DROP TABLE в ещё не зафиксированной транзакции держит исключительную блокировку.
         second.execute("BEGIN");
@@ -127,12 +129,19 @@ class DdlConcurrencyTest {
         assertThat(rows(first, "SELECT id FROM users WHERE email = 'ann@x'")).containsExactly(List.of(1));
     }
 
+    /** Описание {@code users} в последнем зафиксированном состоянии. */
+    private TableDef users() {
+        try (KvTransaction tx = catalog.begin()) {
+            return catalog.table(tx, "users").orElseThrow().table();
+        }
+    }
+
     private static List<List<Object>> rows(SqlSession session, String sql) {
         return ((StatementResult.Rows) session.execute(sql)).rows();
     }
 
     private int indexEntries() {
-        int tableId = catalog.table("users").orElseThrow().table().id();
+        int tableId = users().id();
         return keys(new KeyBuilder().appendByte('I').appendInt(tableId).appendInt(1).build());
     }
 

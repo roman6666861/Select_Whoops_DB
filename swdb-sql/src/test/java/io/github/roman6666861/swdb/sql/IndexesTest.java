@@ -292,7 +292,9 @@ class IndexesTest {
     }
 
     private TableDef table() {
-        return catalog.table("users").orElseThrow().table();
+        try (KvTransaction tx = catalog.begin()) {
+            return catalog.table(tx, "users").orElseThrow().table();
+        }
     }
 
     /** Число записей индекса в хранилище: ключи {@code 'I' [tableId] [indexId] ...}. */

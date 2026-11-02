@@ -19,7 +19,6 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.Function;
 
 /**
  * Каталог таблиц и индексов. Описания хранятся в том же RocksDB (ключи {@code 'M' 'T' [id]})
@@ -27,8 +26,8 @@ import java.util.function.Function;
  * видит каталог на момент своего снимка вместе со своими незафиксированными изменениями,
  * а DDL откатывается вместе с остальной транзакцией.
  * <p>
- * Методы без транзакции выполняют операцию в своей транзакции и сразу её фиксируют,
- * как оператор вне {@code BEGIN}.
+ * Каждый метод работает в транзакции, которую передал вызывающий: каталог сам транзакции
+ * не начинает и не фиксирует. Так блокировки таблиц всегда держит транзакция оператора.
  */
 public final class Catalog {
 
@@ -108,11 +107,6 @@ public final class Catalog {
                 .map(this::storeOf);
     }
 
-    /** Таблица в последнем зафиксированном состоянии каталога. */
-    public Optional<TableStore> table(String name) {
-        return autocommit(tx -> table(tx, name));
-    }
-
     /** Все таблицы, какими их видит транзакция. */
     public List<TableStore> tables(KvTransaction tx) {
         byte[] prefix = Keys.tableMetaPrefix();
@@ -123,10 +117,6 @@ public final class Catalog {
             }
         }
         return result;
-    }
-
-    public List<TableStore> tables() {
-        return autocommit(this::tables);
     }
 
     /**
@@ -162,10 +152,6 @@ public final class Catalog {
         return true;
     }
 
-    public boolean createTable(String name, List<ColumnDef> columns, List<String> primaryKey, boolean ifNotExists) {
-        return autocommit(tx -> createTable(tx, name, columns, primaryKey, ifNotExists));
-    }
-
     /**
      * Удаляет таблицу вместе со строками, индексами и их именами.
      *
@@ -190,10 +176,6 @@ public final class Catalog {
         tx.delete(Keys.tableMeta(table.id()));
         tx.delete(nameKey);
         return true;
-    }
-
-    public boolean dropTable(String name, boolean ifExists) {
-        return autocommit(tx -> dropTable(tx, name, ifExists));
     }
 
     /**
@@ -252,15 +234,6 @@ public final class Catalog {
         return true;
     }
 
-    public boolean createIndex(String tableName, String name, List<String> columns, boolean unique,
-                               boolean ifNotExists) {
-        return autocommit(tx -> createIndex(tx, tableName, name, columns, unique, ifNotExists));
-    }
-
-    public boolean createIndex(String tableName, String name, List<String> columns, boolean ifNotExists) {
-        return createIndex(tableName, name, columns, false, ifNotExists);
-    }
-
     /**
      * Удаляет индекс вместе со всеми его записями.
      *
@@ -281,18 +254,6 @@ public final class Catalog {
         tx.put(Keys.tableMeta(table.id()), toJson(table.withoutIndex(name)));
         tx.delete(nameKey);
         return true;
-    }
-
-    public boolean dropIndex(String name, boolean ifExists) {
-        return autocommit(tx -> dropIndex(tx, name, ifExists));
-    }
-
-    private <T> T autocommit(Function<KvTransaction, T> work) {
-        try (KvTransaction tx = begin()) {
-            T result = work.apply(tx);
-            tx.commit();
-            return result;
-        }
     }
 
     private static Optional<Relation> relation(byte[] value) {

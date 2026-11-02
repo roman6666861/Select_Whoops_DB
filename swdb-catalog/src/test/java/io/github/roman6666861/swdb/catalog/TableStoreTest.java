@@ -32,6 +32,7 @@ class TableStoreTest {
 
     private KvStore store;
     private Catalog catalog;
+    private final Autocommit auto = new Autocommit(() -> catalog);
     private KvTransaction tx;
 
     @BeforeEach
@@ -115,9 +116,9 @@ class TableStoreTest {
     @Test
     void scanDoesNotLeakIntoNeighbourTables() {
         TableStore first = intTable(1, 2);
-        catalog.createTable("other", List.of(new ColumnDef("id", ColumnType.INTEGER, -1, -1, false)),
+        auto.createTable("other", List.of(new ColumnDef("id", ColumnType.INTEGER, -1, -1, false)),
                 List.of("id"), false);
-        catalog.table("other").orElseThrow().insert(tx, new Object[]{1});
+        auto.table("other").orElseThrow().insert(tx, new Object[]{1});
 
         assertThat(ids(first.scan(tx, KeyBound.inclusive(2), null))).containsExactly(2);
         assertThat(ids(first.scan(tx, null, null))).containsExactly(1, 2);
@@ -125,9 +126,9 @@ class TableStoreTest {
 
     @Test
     void stringKeyRange() {
-        catalog.createTable("words", List.of(new ColumnDef("w", ColumnType.VARCHAR, 10, -1, false)),
+        auto.createTable("words", List.of(new ColumnDef("w", ColumnType.VARCHAR, 10, -1, false)),
                 List.of("w"), false);
-        TableStore t = catalog.table("words").orElseThrow();
+        TableStore t = auto.table("words").orElseThrow();
         for (String w : List.of("a", "ab", "abc", "b", "ba")) {
             t.insert(tx, new Object[]{w});
         }
@@ -139,11 +140,11 @@ class TableStoreTest {
 
     @Test
     void compositeKeyPrefixSelectsAllRowsWithLeadingValue() {
-        catalog.createTable("events", List.of(
+        auto.createTable("events", List.of(
                         new ColumnDef("day", ColumnType.INTEGER, -1, -1, false),
                         new ColumnDef("seq", ColumnType.INTEGER, -1, -1, false)),
                 List.of("day", "seq"), false);
-        TableStore t = catalog.table("events").orElseThrow();
+        TableStore t = auto.table("events").orElseThrow();
         for (int day = 1; day <= 3; day++) {
             for (int seq = 1; seq <= 3; seq++) {
                 t.insert(tx, new Object[]{day, seq});
@@ -400,23 +401,23 @@ class TableStoreTest {
     @Test
     void uniqueIndexOnDuplicateDataIsNotCreated() {
         intTable(1, 2);
-        catalog.table("t").orElseThrow().insert(tx, new Object[]{3, "v1"});
-        catalog.table("t").orElseThrow().insert(tx, new Object[]{4, null});
-        catalog.table("t").orElseThrow().insert(tx, new Object[]{5, null});
+        auto.table("t").orElseThrow().insert(tx, new Object[]{3, "v1"});
+        auto.table("t").orElseThrow().insert(tx, new Object[]{4, null});
+        auto.table("t").orElseThrow().insert(tx, new Object[]{5, null});
         tx.commit();
 
-        assertThatThrownBy(() -> catalog.createIndex("t", "t_v", List.of("v"), true, false))
+        assertThatThrownBy(() -> auto.createIndex("t", "t_v", List.of("v"), true, false))
                 .isInstanceOfSatisfying(SwdbException.class, e -> {
                     assertThat(e.sqlState()).isEqualTo(SqlStates.UNIQUE_VIOLATION);
                     assertThat(e.getMessage()).isEqualTo("could not create unique index \"t_v\"");
                 });
-        assertThat(catalog.table("t").orElseThrow().table().indexes()).isEmpty();
+        assertThat(auto.table("t").orElseThrow().table().indexes()).isEmpty();
 
         // Без дубликатов (NULL не в счёт) индекс создаётся.
-        assertThat(catalog.createIndex("t", "t_id_v", List.of("id", "v"), true, false)).isTrue();
+        assertThat(auto.createIndex("t", "t_id_v", List.of("id", "v"), true, false)).isTrue();
         tx.close();
         tx = catalog.begin();
-        assertIndexesMatchRows(catalog.table("t").orElseThrow(), 5);
+        assertIndexesMatchRows(auto.table("t").orElseThrow(), 5);
     }
 
     private static void assertDuplicate(Runnable action) {
@@ -427,8 +428,8 @@ class TableStoreTest {
     /** {@code t(id, v)} с уникальным индексом {@code t_v (v)} и строками {@code (id, "v" + id)}. */
     private TableStore uniqueTable(int... ids) {
         intTable();
-        catalog.createIndex("t", "t_v", List.of("v"), true, false);
-        TableStore t = catalog.table("t").orElseThrow();
+        auto.createIndex("t", "t_v", List.of("v"), true, false);
+        TableStore t = auto.table("t").orElseThrow();
         for (int id : ids) {
             t.insert(tx, new Object[]{id, "v" + id});
         }
@@ -440,14 +441,14 @@ class TableStoreTest {
      * {@code people_age_email (age, email)}; строки 4 и 5 содержат NULL.
      */
     private TableStore people() {
-        catalog.createTable("people", List.of(
+        auto.createTable("people", List.of(
                         new ColumnDef("id", ColumnType.INTEGER, -1, -1, false),
                         new ColumnDef("age", ColumnType.INTEGER, -1, -1, true),
                         new ColumnDef("email", ColumnType.VARCHAR, 10, -1, true)),
                 List.of("id"), false);
-        catalog.createIndex("people", "people_age", List.of("age"), false);
-        catalog.createIndex("people", "people_age_email", List.of("age", "email"), false);
-        TableStore people = catalog.table("people").orElseThrow();
+        auto.createIndex("people", "people_age", List.of("age"), false);
+        auto.createIndex("people", "people_age_email", List.of("age", "email"), false);
+        TableStore people = auto.table("people").orElseThrow();
         for (Object[] row : new Object[][]{{1, 30, "b"}, {2, 20, "a"}, {3, 30, "a"}, {4, null, "c"}, {5, 40, null}}) {
             people.insert(tx, row);
         }
@@ -461,9 +462,9 @@ class TableStoreTest {
     /** Таблица {@code t(id, v)} с индексами по {@code (v)} и {@code (v, id)}, без строк. */
     private TableStore indexedTable() {
         intTable();
-        catalog.createIndex("t", "t_v", List.of("v"), false);
-        catalog.createIndex("t", "t_v_id", List.of("v", "id"), false);
-        return catalog.table("t").orElseThrow();
+        auto.createIndex("t", "t_v", List.of("v"), false);
+        auto.createIndex("t", "t_v_id", List.of("v", "id"), false);
+        return auto.table("t").orElseThrow();
     }
 
     /** В каждом индексе ровно те записи, которые построил бы по строкам таблицы {@code createIndex}. */
@@ -498,11 +499,11 @@ class TableStoreTest {
 
     /** Таблица {@code t(id INT, v VARCHAR)} со строками {@code (id, "v" + id)}. */
     private TableStore intTable(int... ids) {
-        catalog.createTable("t", List.of(
+        auto.createTable("t", List.of(
                         new ColumnDef("id", ColumnType.INTEGER, -1, -1, false),
                         new ColumnDef("v", ColumnType.VARCHAR, 10, -1, true)),
                 List.of("id"), false);
-        TableStore t = catalog.table("t").orElseThrow();
+        TableStore t = auto.table("t").orElseThrow();
         for (int id : ids) {
             t.insert(tx, new Object[]{id, "v" + id});
         }

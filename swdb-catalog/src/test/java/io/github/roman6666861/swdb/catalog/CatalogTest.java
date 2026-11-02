@@ -31,6 +31,7 @@ class CatalogTest {
 
     private KvStore store;
     private Catalog catalog;
+    private final Autocommit auto = new Autocommit(() -> catalog);
 
     @BeforeEach
     void open() {
@@ -45,8 +46,8 @@ class CatalogTest {
 
     @Test
     void createInsertScanInPrimaryKeyOrder() {
-        catalog.createTable("users", USERS, List.of("id"), false);
-        TableStore users = catalog.table("users").orElseThrow();
+        auto.createTable("users", USERS, List.of("id"), false);
+        TableStore users = auto.table("users").orElseThrow();
 
         insert(users, new Object[]{3, "carol", new BigDecimal("30.00")});
         insert(users, new Object[]{-1, "ann", null});
@@ -60,17 +61,17 @@ class CatalogTest {
 
     @Test
     void primaryKeyColumnsBecomeNotNull() {
-        catalog.createTable("users", USERS, List.of("id"), false);
+        auto.createTable("users", USERS, List.of("id"), false);
 
-        assertThat(catalog.table("users").orElseThrow().table().columns().getFirst().nullable()).isFalse();
-        assertThatThrownBy(() -> insert(catalog.table("users").orElseThrow(), new Object[]{null, "x", null}))
+        assertThat(auto.table("users").orElseThrow().table().columns().getFirst().nullable()).isFalse();
+        assertThatThrownBy(() -> insert(auto.table("users").orElseThrow(), new Object[]{null, "x", null}))
                 .satisfies(e -> assertSqlState(e, SqlStates.NOT_NULL_VIOLATION));
     }
 
     @Test
     void duplicatePrimaryKeyIsRejected() {
-        catalog.createTable("users", USERS, List.of("id"), false);
-        TableStore users = catalog.table("users").orElseThrow();
+        auto.createTable("users", USERS, List.of("id"), false);
+        TableStore users = auto.table("users").orElseThrow();
         insert(users, new Object[]{1, "ann", null});
 
         assertThatThrownBy(() -> insert(users, new Object[]{1, "bob", null}))
@@ -79,60 +80,60 @@ class CatalogTest {
 
     @Test
     void varcharLengthIsEnforced() {
-        catalog.createTable("users", USERS, List.of("id"), false);
+        auto.createTable("users", USERS, List.of("id"), false);
 
-        assertThatThrownBy(() -> insert(catalog.table("users").orElseThrow(), new Object[]{1, "toolong", null}))
+        assertThatThrownBy(() -> insert(auto.table("users").orElseThrow(), new Object[]{1, "toolong", null}))
                 .satisfies(e -> assertSqlState(e, SqlStates.STRING_DATA_RIGHT_TRUNCATION));
     }
 
     @Test
     void tablesAndRowsSurviveRestart() {
-        catalog.createTable("users", USERS, List.of("id"), false);
-        insert(catalog.table("users").orElseThrow(), new Object[]{1, "ann", BigDecimal.ONE});
+        auto.createTable("users", USERS, List.of("id"), false);
+        insert(auto.table("users").orElseThrow(), new Object[]{1, "ann", BigDecimal.ONE});
         store.close();
 
         store = KvStore.open(dir);
         catalog = new Catalog(store);
 
-        TableStore users = catalog.table("users").orElseThrow();
+        TableStore users = auto.table("users").orElseThrow();
         assertThat(users.table().columns()).extracting(ColumnDef::name).containsExactly("id", "name", "balance");
         assertThat(rows(users)).containsExactly(new Object[]{1, "ann", BigDecimal.ONE});
     }
 
     @Test
     void dropRemovesDataAndIdIsNotConfused() {
-        catalog.createTable("a", USERS, List.of("id"), false);
-        insert(catalog.table("a").orElseThrow(), new Object[]{1, "x", null});
-        catalog.createTable("b", USERS, List.of("id"), false);
-        insert(catalog.table("b").orElseThrow(), new Object[]{2, "y", null});
+        auto.createTable("a", USERS, List.of("id"), false);
+        insert(auto.table("a").orElseThrow(), new Object[]{1, "x", null});
+        auto.createTable("b", USERS, List.of("id"), false);
+        insert(auto.table("b").orElseThrow(), new Object[]{2, "y", null});
 
-        catalog.dropTable("a", false);
+        auto.dropTable("a", false);
 
-        assertThat(catalog.table("a")).isEmpty();
-        assertThat(rows(catalog.table("b").orElseThrow())).containsExactly(new Object[]{2, "y", null});
-        assertThatThrownBy(() -> catalog.dropTable("a", false))
+        assertThat(auto.table("a")).isEmpty();
+        assertThat(rows(auto.table("b").orElseThrow())).containsExactly(new Object[]{2, "y", null});
+        assertThatThrownBy(() -> auto.dropTable("a", false))
                 .satisfies(e -> assertSqlState(e, SqlStates.UNDEFINED_TABLE));
-        assertThat(catalog.dropTable("a", true)).isFalse();
+        assertThat(auto.dropTable("a", true)).isFalse();
     }
 
     @Test
     void ddlErrors() {
-        catalog.createTable("users", USERS, List.of("id"), false);
+        auto.createTable("users", USERS, List.of("id"), false);
 
-        assertThatThrownBy(() -> catalog.createTable("users", USERS, List.of("id"), false))
+        assertThatThrownBy(() -> auto.createTable("users", USERS, List.of("id"), false))
                 .satisfies(e -> assertSqlState(e, SqlStates.DUPLICATE_TABLE));
-        assertThat(catalog.createTable("users", USERS, List.of("id"), true)).isFalse();
-        assertThatThrownBy(() -> catalog.createTable("t", USERS, List.of(), false))
+        assertThat(auto.createTable("users", USERS, List.of("id"), true)).isFalse();
+        assertThatThrownBy(() -> auto.createTable("t", USERS, List.of(), false))
                 .satisfies(e -> assertSqlState(e, SqlStates.FEATURE_NOT_SUPPORTED));
-        assertThatThrownBy(() -> catalog.createTable("t", USERS, List.of("nope"), false))
+        assertThatThrownBy(() -> auto.createTable("t", USERS, List.of("nope"), false))
                 .satisfies(e -> assertSqlState(e, SqlStates.UNDEFINED_COLUMN));
     }
 
     @Test
     void decimalPrimaryKeyKeepsNumericOrder() {
-        catalog.createTable("prices", List.of(new ColumnDef("p", ColumnType.DECIMAL, 10, 2, false)),
+        auto.createTable("prices", List.of(new ColumnDef("p", ColumnType.DECIMAL, 10, 2, false)),
                 List.of("p"), false);
-        TableStore prices = catalog.table("prices").orElseThrow();
+        TableStore prices = auto.table("prices").orElseThrow();
         for (String p : List.of("10.00", "-1.50", "2.00", "1.50", "0.00")) {
             insert(prices, new Object[]{new BigDecimal(p)});
         }
@@ -149,15 +150,15 @@ class CatalogTest {
 
     @Test
     void createIndexFillsEntriesForExistingRows() {
-        catalog.createTable("users", USERS, List.of("id"), false);
-        TableStore users = catalog.table("users").orElseThrow();
+        auto.createTable("users", USERS, List.of("id"), false);
+        TableStore users = auto.table("users").orElseThrow();
         insert(users, new Object[]{1, "bob", null});
         insert(users, new Object[]{2, null, null});
         insert(users, new Object[]{3, "ann", null});
 
-        assertThat(catalog.createIndex("users", "users_name", List.of("name"), false)).isTrue();
+        assertThat(auto.createIndex("users", "users_name", List.of("name"), false)).isTrue();
 
-        TableDef table = catalog.table("users").orElseThrow().table();
+        TableDef table = auto.table("users").orElseThrow().table();
         IndexDef index = table.indexes().getFirst();
         assertThat(index).isEqualTo(new IndexDef(1, "users_name", List.of(1)));
         // Записи в порядке значения (NULL первым), в значении — ключ строки.
@@ -170,69 +171,69 @@ class CatalogTest {
 
     @Test
     void indexesSurviveRestart() {
-        catalog.createTable("users", USERS, List.of("id"), false);
-        catalog.createIndex("users", "users_name", List.of("name"), false);
-        catalog.createIndex("users", "users_name_id", List.of("name", "id"), false);
+        auto.createTable("users", USERS, List.of("id"), false);
+        auto.createIndex("users", "users_name", List.of("name"), false);
+        auto.createIndex("users", "users_name_id", List.of("name", "id"), false);
         store.close();
 
         store = KvStore.open(dir);
         catalog = new Catalog(store);
 
-        assertThat(catalog.table("users").orElseThrow().table().indexes()).containsExactly(
+        assertThat(auto.table("users").orElseThrow().table().indexes()).containsExactly(
                 new IndexDef(1, "users_name", List.of(1)),
                 new IndexDef(2, "users_name_id", List.of(1, 0)));
     }
 
     @Test
     void dropIndexRemovesEntries() {
-        catalog.createTable("users", USERS, List.of("id"), false);
-        insert(catalog.table("users").orElseThrow(), new Object[]{1, "bob", null});
-        catalog.createIndex("users", "users_name", List.of("name"), false);
-        int tableId = catalog.table("users").orElseThrow().table().id();
+        auto.createTable("users", USERS, List.of("id"), false);
+        insert(auto.table("users").orElseThrow(), new Object[]{1, "bob", null});
+        auto.createIndex("users", "users_name", List.of("name"), false);
+        int tableId = auto.table("users").orElseThrow().table().id();
 
-        assertThat(catalog.dropIndex("users_name", false)).isTrue();
+        assertThat(auto.dropIndex("users_name", false)).isTrue();
 
-        assertThat(catalog.table("users").orElseThrow().table().indexes()).isEmpty();
+        assertThat(auto.table("users").orElseThrow().table().indexes()).isEmpty();
         assertThat(entries(tableId, 1)).isEmpty();
-        assertThat(rows(catalog.table("users").orElseThrow())).containsExactly(new Object[]{1, "bob", null});
-        assertThat(catalog.dropIndex("users_name", true)).isFalse();
-        assertThatThrownBy(() -> catalog.dropIndex("users_name", false))
+        assertThat(rows(auto.table("users").orElseThrow())).containsExactly(new Object[]{1, "bob", null});
+        assertThat(auto.dropIndex("users_name", true)).isFalse();
+        assertThatThrownBy(() -> auto.dropIndex("users_name", false))
                 .satisfies(e -> assertSqlState(e, SqlStates.UNDEFINED_OBJECT));
     }
 
     @Test
     void dropTableRemovesIndexEntries() {
-        catalog.createTable("users", USERS, List.of("id"), false);
-        insert(catalog.table("users").orElseThrow(), new Object[]{1, "bob", null});
-        catalog.createIndex("users", "users_name", List.of("name"), false);
-        int tableId = catalog.table("users").orElseThrow().table().id();
+        auto.createTable("users", USERS, List.of("id"), false);
+        insert(auto.table("users").orElseThrow(), new Object[]{1, "bob", null});
+        auto.createIndex("users", "users_name", List.of("name"), false);
+        int tableId = auto.table("users").orElseThrow().table().id();
 
-        catalog.dropTable("users", false);
+        auto.dropTable("users", false);
 
         assertThat(entries(tableId, 1)).isEmpty();
         // Имя индекса освободилось вместе с таблицей.
-        catalog.createTable("users_name", USERS, List.of("id"), false);
+        auto.createTable("users_name", USERS, List.of("id"), false);
     }
 
     @Test
     void indexErrors() {
-        catalog.createTable("users", USERS, List.of("id"), false);
-        catalog.createIndex("users", "users_name", List.of("name"), false);
+        auto.createTable("users", USERS, List.of("id"), false);
+        auto.createIndex("users", "users_name", List.of("name"), false);
 
         // Индексы и таблицы делят одно пространство имён.
-        assertThatThrownBy(() -> catalog.createIndex("users", "users_name", List.of("id"), false))
+        assertThatThrownBy(() -> auto.createIndex("users", "users_name", List.of("id"), false))
                 .satisfies(e -> assertSqlState(e, SqlStates.DUPLICATE_TABLE));
-        assertThatThrownBy(() -> catalog.createIndex("users", "users", List.of("id"), false))
+        assertThatThrownBy(() -> auto.createIndex("users", "users", List.of("id"), false))
                 .satisfies(e -> assertSqlState(e, SqlStates.DUPLICATE_TABLE));
-        assertThatThrownBy(() -> catalog.createTable("users_name", USERS, List.of("id"), false))
+        assertThatThrownBy(() -> auto.createTable("users_name", USERS, List.of("id"), false))
                 .satisfies(e -> assertSqlState(e, SqlStates.DUPLICATE_TABLE));
-        assertThat(catalog.createIndex("users", "users_name", List.of("id"), true)).isFalse();
+        assertThat(auto.createIndex("users", "users_name", List.of("id"), true)).isFalse();
 
-        assertThatThrownBy(() -> catalog.createIndex("nope", "i", List.of("id"), false))
+        assertThatThrownBy(() -> auto.createIndex("nope", "i", List.of("id"), false))
                 .satisfies(e -> assertSqlState(e, SqlStates.UNDEFINED_TABLE));
-        assertThatThrownBy(() -> catalog.createIndex("users", "i", List.of("nope"), false))
+        assertThatThrownBy(() -> auto.createIndex("users", "i", List.of("nope"), false))
                 .satisfies(e -> assertSqlState(e, SqlStates.UNDEFINED_COLUMN));
-        assertThat(catalog.table("users").orElseThrow().table().indexes()).hasSize(1);
+        assertThat(auto.table("users").orElseThrow().table().indexes()).hasSize(1);
     }
 
     @Test
@@ -243,19 +244,19 @@ class CatalogTest {
 
             assertThat(catalog.table(ddl, "users")).as("своя транзакция видит").isPresent();
             assertThat(catalog.relationExists(ddl, "users_name")).isTrue();
-            assertThat(catalog.table("users")).as("другие — нет").isEmpty();
-            assertThat(catalog.tables()).isEmpty();
+            assertThat(auto.table("users")).as("другие — нет").isEmpty();
+            assertThat(auto.tables()).isEmpty();
 
             ddl.commit();
         }
-        assertThat(catalog.table("users").orElseThrow().table().indexes()).extracting(IndexDef::name)
+        assertThat(auto.table("users").orElseThrow().table().indexes()).extracting(IndexDef::name)
                 .containsExactly("users_name");
     }
 
     @Test
     void rollbackUndoesDdl() {
-        catalog.createTable("users", USERS, List.of("id"), false);
-        insert(catalog.table("users").orElseThrow(), new Object[]{1, "ann", null});
+        auto.createTable("users", USERS, List.of("id"), false);
+        insert(auto.table("users").orElseThrow(), new Object[]{1, "ann", null});
         try (KvTransaction ddl = catalog.begin()) {
             catalog.createIndex(ddl, "users", "users_name", List.of("name"), false, false);
             catalog.createTable(ddl, "other", USERS, List.of("id"), false);
@@ -264,10 +265,10 @@ class CatalogTest {
             ddl.rollback();
         }
 
-        TableStore users = catalog.table("users").orElseThrow();
+        TableStore users = auto.table("users").orElseThrow();
         assertThat(users.table().indexes()).isEmpty();
         assertThat(rows(users)).containsExactly(new Object[]{1, "ann", null});
-        assertThat(catalog.table("other")).isEmpty();
+        assertThat(auto.table("other")).isEmpty();
         try (KvTransaction tx = catalog.begin()) {
             assertThat(catalog.relationExists(tx, "users_name")).isFalse();
         }
@@ -284,7 +285,7 @@ class CatalogTest {
                     .satisfies(e -> assertSqlState(e, SqlStates.LOCK_NOT_AVAILABLE));
             first.commit();
         }
-        assertThat(catalog.createTable("t", USERS, List.of("id"), true)).isFalse();
+        assertThat(auto.createTable("t", USERS, List.of("id"), true)).isFalse();
     }
 
     @Test
@@ -295,24 +296,24 @@ class CatalogTest {
             first.commit();
             second.commit();
         }
-        assertThat(catalog.table("a").orElseThrow().table().id())
-                .isNotEqualTo(catalog.table("b").orElseThrow().table().id());
+        assertThat(auto.table("a").orElseThrow().table().id())
+                .isNotEqualTo(auto.table("b").orElseThrow().table().id());
     }
 
     @Test
     void namesAreRestoredForDatabaseWithoutNameKeys() {
-        catalog.createTable("users", USERS, List.of("id"), false);
-        catalog.createIndex("users", "users_name", List.of("name"), false);
+        auto.createTable("users", USERS, List.of("id"), false);
+        auto.createIndex("users", "users_name", List.of("name"), false);
         // Так выглядит база, созданная до ключей имён: описания есть, имён нет.
         store.delete(Keys.relationName("users"));
         store.delete(Keys.relationName("users_name"));
 
         catalog = new Catalog(store);
 
-        assertThat(catalog.table("users")).isPresent();
-        assertThatThrownBy(() -> catalog.createTable("users_name", USERS, List.of("id"), false))
+        assertThat(auto.table("users")).isPresent();
+        assertThatThrownBy(() -> auto.createTable("users_name", USERS, List.of("id"), false))
                 .satisfies(e -> assertSqlState(e, SqlStates.DUPLICATE_TABLE));
-        assertThat(catalog.dropIndex("users_name", false)).isTrue();
+        assertThat(auto.dropIndex("users_name", false)).isTrue();
     }
 
     /** Записи индекса как пары {ключ, значение}. */
