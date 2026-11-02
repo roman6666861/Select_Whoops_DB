@@ -17,8 +17,8 @@ swdb-server/build/install/swdb/bin/swdb --port 5432 --data-dir data
 psql -h 127.0.0.1 -p 5432 -c "SELECT 1"
 ```
 
-JDBC: `jdbc:postgresql://127.0.0.1:5432/swdb?preferQueryMode=simple`
-(extended query protocol пока не поддерживается).
+JDBC: `jdbc:postgresql://127.0.0.1:5432/swdb` — с настройками драйвера по умолчанию
+(extended query protocol: подготовленные операторы с параметрами, текстовый и бинарный формат значений).
 
 ## Что поддерживается
 

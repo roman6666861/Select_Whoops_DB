@@ -15,8 +15,7 @@ import java.sql.Statement;
  */
 public final class JdbcExample {
 
-    // preferQueryMode=simple: сервер пока не поддерживает prepared statements (extended protocol).
-    private static final String URL = "jdbc:postgresql://127.0.0.1:5432/swdb?preferQueryMode=simple";
+    private static final String URL = "jdbc:postgresql://127.0.0.1:5432/swdb";
     private static final String USER = "roman";
     private static final String PASSWORD = "";
 
