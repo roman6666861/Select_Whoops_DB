@@ -236,6 +236,43 @@ class IndexesTest {
     }
 
     @Test
+    void uniqueConstraintsInCreateTable() {
+        session.execute("""
+                CREATE TABLE accounts (
+                  id INT PRIMARY KEY,
+                  email VARCHAR(50) NOT NULL UNIQUE,
+                  region INT,
+                  login VARCHAR(20),
+                  UNIQUE (region, login),
+                  CONSTRAINT accounts_login_unique UNIQUE (login))""");
+
+        // UNIQUE из объявления колонки переписывается в ограничение таблицы в конце списка.
+        assertThat(indexesOf("accounts")).containsExactly(
+                new IndexDef(1, "accounts_region_login_key", List.of(2, 3), true),
+                new IndexDef(2, "accounts_login_unique", List.of(3), true),
+                new IndexDef(3, "accounts_email_key", List.of(1), true));
+
+        session.execute("INSERT INTO accounts VALUES (1, 'a@x', 1, 'ann')");
+        assertThatThrownBy(() -> session.execute("INSERT INTO accounts VALUES (2, 'a@x', 2, 'bob')"))
+                .isInstanceOfSatisfying(SwdbException.class, e -> assertThat(e.getMessage())
+                        .isEqualTo("duplicate key value violates unique constraint \"accounts_email_key\""));
+        assertSqlState("INSERT INTO accounts VALUES (2, 'b@x', 2, 'ann')", SqlStates.UNIQUE_VIOLATION);
+        // DROP TABLE освобождает и имена ограничений.
+        session.execute("DROP TABLE accounts");
+        session.execute("CREATE INDEX accounts_email_key ON users (email)");
+    }
+
+    @Test
+    void failedUniqueConstraintLeavesNoTable() {
+        // Имя ограничения занято таблицей users: не создаётся ни индекс, ни таблица.
+        assertSqlState("CREATE TABLE t (id INT PRIMARY KEY, e INT, CONSTRAINT users UNIQUE (e))", SqlStates.DUPLICATE_TABLE);
+        assertSqlState("SELECT id FROM t", SqlStates.UNDEFINED_TABLE);
+        // CREATE TABLE IF NOT EXISTS для существующей таблицы не трогает её индексы.
+        session.execute("CREATE TABLE IF NOT EXISTS users (id INT PRIMARY KEY, email VARCHAR(20) UNIQUE)");
+        assertThat(indexes()).isEmpty();
+    }
+
+    @Test
     void uniqueIndexOnDuplicatesFails() {
         session.execute("INSERT INTO users VALUES (3, 'x@x', 30)");
 
@@ -289,6 +326,12 @@ class IndexesTest {
 
     private List<IndexDef> indexes() {
         return table().indexes();
+    }
+
+    private List<IndexDef> indexesOf(String table) {
+        try (KvTransaction tx = catalog.begin()) {
+            return catalog.table(tx, table).orElseThrow().table().indexes();
+        }
     }
 
     private TableDef table() {

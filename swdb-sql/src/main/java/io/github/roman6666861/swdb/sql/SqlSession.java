@@ -367,7 +367,7 @@ public final class SqlSession implements AutoCloseable {
     }
 
     private static String normalize(String sql) {
-        return ColumnPrimaryKey.toTableConstraint(calciteExplainSyntax(stripTrailingSemicolons(sql)));
+        return ColumnConstraints.toTableConstraints(calciteExplainSyntax(stripTrailingSemicolons(sql)));
     }
 
     private static String stripTrailingSemicolons(String sql) {

@@ -46,6 +46,7 @@ final class DdlExecutor {
         }
         List<ColumnDef> columns = new ArrayList<>();
         List<String> primaryKey = new ArrayList<>();
+        List<SqlKeyConstraint> uniques = new ArrayList<>();
         for (SqlNode element : create.columnList) {
             switch (element) {
                 case SqlColumnDeclaration column -> {
@@ -59,15 +60,34 @@ final class DdlExecutor {
                         throw new SwdbException(SqlStates.INVALID_TABLE_DEFINITION,
                                 "multiple primary keys for table are not allowed");
                     }
-                    for (SqlNode keyColumn : (SqlNodeList) key.getOperandList().get(1)) {
-                        primaryKey.add(((SqlIdentifier) keyColumn).getSimple());
-                    }
+                    primaryKey.addAll(keyColumns(key));
                 }
+                case SqlKeyConstraint key when key.getOperator().getKind() == SqlKind.UNIQUE -> uniques.add(key);
                 default -> throw unsupported("constraint " + element);
             }
         }
-        catalog.createTable(transaction.current(), tableName(create.name), columns, primaryKey, create.ifNotExists);
+        String table = tableName(create.name);
+        if (catalog.createTable(transaction.current(), table, columns, primaryKey, create.ifNotExists)) {
+            // UNIQUE — это уникальный индекс, как и в PostgreSQL. Он создаётся в той же транзакции:
+            // если, например, его имя занято, не появится ни индекса, ни самой таблицы.
+            for (SqlKeyConstraint unique : uniques) {
+                List<String> uniqueColumns = keyColumns(unique);
+                SqlIdentifier constraintName = (SqlIdentifier) unique.getOperandList().get(0);
+                String name = constraintName != null ? constraintName.getSimple()
+                        : freeName(table + "_" + String.join("_", uniqueColumns) + "_key");
+                catalog.createIndex(transaction.current(), table, name, uniqueColumns, true, false);
+            }
+        }
         return new StatementResult.Update("CREATE TABLE", 0);
+    }
+
+    /** Колонки {@code PRIMARY KEY (...)} или {@code UNIQUE (...)}; первый операнд — имя ограничения. */
+    private static List<String> keyColumns(SqlKeyConstraint key) {
+        List<String> columns = new ArrayList<>();
+        for (SqlNode column : (SqlNodeList) key.getOperandList().get(1)) {
+            columns.add(((SqlIdentifier) column).getSimple());
+        }
+        return columns;
     }
 
     StatementResult dropTable(SqlDropTable drop) {
@@ -76,7 +96,8 @@ final class DdlExecutor {
     }
 
     StatementResult createIndex(IndexCommand.Create create) {
-        String name = create.name() != null ? create.name() : defaultIndexName(create.table(), create.columns());
+        String name = create.name() != null ? create.name()
+                : freeName(create.table() + "_" + String.join("_", create.columns()) + "_idx");
         catalog.createIndex(transaction.current(), create.table(), name, create.columns(), create.unique(),
                 create.ifNotExists());
         return new StatementResult.Update("CREATE INDEX", 0);
@@ -87,9 +108,11 @@ final class DdlExecutor {
         return new StatementResult.Update("DROP INDEX", 0);
     }
 
-    /** Как в PostgreSQL: {@code users_email_idx}, а если имя занято — {@code users_email_idx1} и дальше. */
-    private String defaultIndexName(String table, List<String> columns) {
-        String base = table + "_" + String.join("_", columns) + "_idx";
+    /**
+     * Имя по умолчанию, как в PostgreSQL: {@code users_email_idx} для индекса, {@code users_email_key}
+     * для ограничения UNIQUE, а если имя занято — {@code users_email_idx1} и дальше.
+     */
+    private String freeName(String base) {
         String name = base;
         for (int i = 1; catalog.relationExists(transaction.current(), name); i++) {
             name = base + i;

@@ -2,33 +2,36 @@ package io.github.roman6666861.swdb.sql;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * {@code PRIMARY KEY} в объявлении колонки: {@code CREATE TABLE t (id INT PRIMARY KEY, v INT)}.
+ * {@code PRIMARY KEY} и {@code UNIQUE} в объявлении колонки:
+ * {@code CREATE TABLE t (id INT PRIMARY KEY, email VARCHAR(50) UNIQUE)}.
  * <p>
- * Грамматика DDL в Calcite знает только ограничение таблицы {@code PRIMARY KEY (id)}, поэтому
- * текст переписывается до разбора: {@code CREATE TABLE t (id INT, v INT, PRIMARY KEY (id))}.
+ * Грамматика DDL в Calcite знает только ограничения таблицы {@code PRIMARY KEY (id)} и
+ * {@code UNIQUE (email)}, поэтому текст переписывается до разбора:
+ * {@code CREATE TABLE t (id INT, email VARCHAR(50), PRIMARY KEY (id), UNIQUE (email))}.
  * <p>
  * Список колонок разбирается посимвольно, а не регулярным выражением: запятые внутри
  * {@code DECIMAL(10, 2)}, строки в {@code '...'}, имена в {@code "..."} и комментарии не должны
  * сбивать разбор. Если колонка с {@code PRIMARY KEY} не одна, ограничений таблицы тоже получится
  * несколько, и {@code CREATE TABLE} отклонит их так же, как два {@code PRIMARY KEY (...)}.
  */
-final class ColumnPrimaryKey {
+final class ColumnConstraints {
 
     private static final Pattern CREATE_TABLE = Pattern.compile("(?is)\\s*create\\s+table\\b");
     private static final Pattern AS = Pattern.compile("(?i)\\bas\\b");
-    private static final Pattern PRIMARY_KEY = Pattern.compile("(?i)\\bprimary\\s+key\\b");
+    private static final Pattern COLUMN_CONSTRAINT = Pattern.compile("(?i)\\b(primary\\s+key|unique)\\b");
     /** Элемент списка, который сам является ограничением таблицы, а не колонкой. */
     private static final Pattern TABLE_CONSTRAINT = Pattern.compile("(?is)\\s*(primary|constraint|unique|foreign|check)\\b.*");
 
-    private ColumnPrimaryKey() {
+    private ColumnConstraints() {
     }
 
     /** Переписанный текст или тот же самый, если переписывать нечего. */
-    static String toTableConstraint(String sql) {
+    static String toTableConstraints(String sql) {
         Matcher create = CREATE_TABLE.matcher(sql);
         if (!create.lookingAt()) {
             return sql;
@@ -70,24 +73,33 @@ final class ColumnPrimaryKey {
         }
 
         List<String> columns = new ArrayList<>();
-        List<String> keyColumns = new ArrayList<>();
+        List<String> constraints = new ArrayList<>();
         for (int[] element : elements) {
             String text = sql.substring(element[0], element[1]);
             String elementMask = mask.substring(element[0], element[1]);
-            Matcher key = PRIMARY_KEY.matcher(elementMask);
-            if (TABLE_CONSTRAINT.matcher(elementMask).matches() || !key.find()) {
+            if (TABLE_CONSTRAINT.matcher(elementMask).matches()) {
                 columns.add(text);
                 continue;
             }
-            keyColumns.add(columnName(text.strip()));
-            columns.add(text.substring(0, key.start()) + text.substring(key.end()));
+            // Ограничения вырезаются из объявления колонки, а взамен в конец списка
+            // дописываются такие же ограничения таблицы.
+            Matcher constraint = COLUMN_CONSTRAINT.matcher(elementMask);
+            StringBuilder column = new StringBuilder();
+            int kept = 0;
+            while (constraint.find()) {
+                column.append(text, kept, constraint.start());
+                kept = constraint.end();
+                String keyword = constraint.group(1).toLowerCase(Locale.ROOT).startsWith("primary") ? "PRIMARY KEY" : "UNIQUE";
+                constraints.add(keyword + " (" + columnName(text.strip()) + ")");
+            }
+            columns.add(column.append(text.substring(kept)).toString());
         }
-        if (keyColumns.isEmpty()) {
+        if (constraints.isEmpty()) {
             return sql;
         }
         StringBuilder result = new StringBuilder(sql.substring(0, open + 1)).append(String.join(",", columns));
-        for (String column : keyColumns) {
-            result.append(", PRIMARY KEY (").append(column).append(')');
+        for (String constraint : constraints) {
+            result.append(", ").append(constraint);
         }
         return result.append(sql.substring(close)).toString();
     }
