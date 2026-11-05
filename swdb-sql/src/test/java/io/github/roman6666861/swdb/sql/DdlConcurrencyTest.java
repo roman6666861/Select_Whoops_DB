@@ -130,8 +130,20 @@ class DdlConcurrencyTest {
     }
 
     @Test
-    void transactionStartedBeforeDdlMustRetry() {
+    void readCommittedStatementAfterDdlSeesNewIndex() {
         first.execute("BEGIN");
+        first.execute("SELECT 1");
+
+        second.execute("CREATE INDEX users_email ON users (email)");
+
+        // Свежий снимок оператора уже содержит индекс и его записи.
+        assertThat(rows(first, "SELECT id FROM users WHERE email = 'ann@x'")).containsExactly(List.of(1));
+        first.execute("COMMIT");
+    }
+
+    @Test
+    void repeatableReadTransactionStartedBeforeDdlMustRetry() {
+        first.execute("BEGIN ISOLATION LEVEL REPEATABLE READ");
         first.execute("SELECT 1");
 
         second.execute("CREATE INDEX users_email ON users (email)");

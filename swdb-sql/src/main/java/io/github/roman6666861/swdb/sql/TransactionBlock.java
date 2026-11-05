@@ -17,18 +17,21 @@ import java.util.function.Supplier;
  *   <li>Ошибка внутри транзакции её «ломает»: изменения откатываются, и до конца блока
  *       принимаются только {@code COMMIT} и {@code ROLLBACK}, остальное получает {@code 25P02}.
  *       {@code COMMIT} сломанной транзакции ничего не фиксирует и отвечает {@code ROLLBACK}.</li>
+ *   <li>Уровень изоляции блока — {@link IsolationLevel}: в READ COMMITTED (по умолчанию) каждый
+ *       оператор получает свежий снимок, в REPEATABLE READ вся транзакция видит снимок BEGIN.</li>
  * </ul>
  * Как и в PostgreSQL, {@code BEGIN} внутри транзакции и {@code COMMIT}/{@code ROLLBACK} вне её
  * ничего не делают (PostgreSQL при этом выдаёт предупреждение, у нас предупреждений пока нет).
  */
 final class TransactionBlock {
 
-    /** Сколько раз выполнять оператор вне BEGIN, пока он получает {@code 40001}. */
+    /** Сколько раз выполнять оператор (вне BEGIN или в READ COMMITTED), пока он получает {@code 40001}. */
     static final int MAX_ATTEMPTS = 5;
 
     private final Catalog catalog;
     private final SessionTransaction current;
     private KvTransaction open;
+    private IsolationLevel level;
     private boolean failed;
 
     TransactionBlock(Catalog catalog, SessionTransaction current) {
@@ -44,14 +47,15 @@ final class TransactionBlock {
 
     StatementResult execute(TransactionCommand command) {
         return switch (command) {
-            case BEGIN -> {
+            case TransactionCommand.Begin begin -> {
                 if (open == null && !failed) {
                     open = catalog.begin();
+                    level = begin.level();
                     current.set(open);
                 }
                 yield new StatementResult.Update("BEGIN", 0);
             }
-            case COMMIT -> {
+            case TransactionCommand.Commit _ -> {
                 if (failed) {
                     failed = false;
                     yield new StatementResult.Update("ROLLBACK", 0);
@@ -65,7 +69,7 @@ final class TransactionBlock {
                 }
                 yield new StatementResult.Update("COMMIT", 0);
             }
-            case ROLLBACK -> {
+            case TransactionCommand.Rollback _ -> {
                 failed = false;
                 if (open != null) {
                     end(); // close без commit — это откат
@@ -103,12 +107,15 @@ final class TransactionBlock {
      * Так оператор, ждавший DDL или чужую запись той же строки, видит их результат, как в PostgreSQL
      * (там каждый оператор вне BEGIN получает новый снимок), а не просит клиента повторить.
      * Это безопасно: изменения неудачной попытки откатаны, а результат ещё не ушёл клиенту —
-     * {@link StatementResult} собирается целиком до возврата. Внутри блока так нельзя:
-     * повтор одного оператора не повторил бы предыдущие, и транзакция видела бы разные снимки.
+     * {@link StatementResult} собирается целиком до возврата.
+     * <p>
+     * Внутри блока READ COMMITTED так же, но откатывается только этот оператор (к точке сохранения),
+     * а не вся транзакция. В REPEATABLE READ повторять нельзя: оператор увидел бы другой снимок,
+     * чем предыдущие операторы той же транзакции, поэтому {@code 40001} получает клиент.
      */
     <T> T withTransaction(Supplier<T> work) {
         if (open != null) {
-            return work.get();
+            return level == IsolationLevel.READ_COMMITTED ? readCommitted(work) : work.get();
         }
         for (int attempt = 1; ; attempt++) {
             try (KvTransaction tx = catalog.begin()) {
@@ -122,6 +129,26 @@ final class TransactionBlock {
                 }
             } finally {
                 current.clear();
+            }
+        }
+    }
+
+    /**
+     * Оператор в блоке READ COMMITTED: свежий снимок и точка сохранения перед каждой попыткой.
+     * Точка снимается только откатом к ней (так устроен RocksDB), поэтому после удачных операторов
+     * они остаются до конца транзакции — по одной небольшой записи на оператор.
+     */
+    private <T> T readCommitted(Supplier<T> work) {
+        for (int attempt = 1; ; attempt++) {
+            open.setSavepoint();
+            open.refreshSnapshot();
+            try {
+                return work.get();
+            } catch (SwdbException e) {
+                if (!e.sqlState().equals(SqlStates.SERIALIZATION_FAILURE) || attempt == MAX_ATTEMPTS) {
+                    throw e;
+                }
+                open.rollbackToSavepoint();
             }
         }
     }

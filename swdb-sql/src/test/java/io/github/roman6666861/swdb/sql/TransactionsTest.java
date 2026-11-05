@@ -75,8 +75,8 @@ class TransactionsTest {
     }
 
     @Test
-    void transactionReadsItsSnapshot() {
-        first.execute("BEGIN");
+    void repeatableReadSeesSnapshotOfBegin() {
+        first.execute("BEGIN ISOLATION LEVEL REPEATABLE READ");
         assertThat(ids(first)).containsExactly(1);
 
         second.execute("INSERT INTO t VALUES (2, 20)"); // autocommit: зафиксировано сразу
@@ -85,6 +85,19 @@ class TransactionsTest {
         assertThat(ids(first)).containsExactly(1);
         first.execute("COMMIT");
         assertThat(ids(first)).containsExactly(1, 2);
+    }
+
+    @Test
+    void readCommittedStatementSeesEarlierCommits() {
+        first.execute("BEGIN"); // READ COMMITTED по умолчанию, как в PostgreSQL
+        first.execute("INSERT INTO t VALUES (3, 30)");
+        assertThat(ids(first)).containsExactly(1, 3);
+
+        second.execute("INSERT INTO t VALUES (2, 20)");
+
+        // Новый оператор — новый снимок: видна строка second и своя незафиксированная строка.
+        assertThat(ids(first)).containsExactly(1, 2, 3);
+        first.execute("COMMIT");
     }
 
     @Test
@@ -104,9 +117,31 @@ class TransactionsTest {
     }
 
     @Test
-    void concurrentUpdateOfSameRowIsSerializationFailure() throws Exception {
+    void readCommittedWaitsForConcurrentUpdateAndSeesIt() throws Exception {
         first.execute("BEGIN");
         second.execute("BEGIN");
+        second.execute("INSERT INTO t VALUES (5, 50)");
+        first.execute("UPDATE t SET v = v + 1 WHERE id = 1");
+
+        CompletableFuture<StatementResult> waiting =
+                CompletableFuture.supplyAsync(() -> second.execute("UPDATE t SET v = v + 1 WHERE id = 1"));
+        Thread.sleep(200);
+        assertThat(waiting).isNotDone();
+
+        first.execute("COMMIT");
+
+        // Оператор откатился к своей точке сохранения и выполнился заново со свежим снимком;
+        // транзакция цела, и строка 5, вставленная до него, на месте.
+        assertThat(waiting.get(5, TimeUnit.SECONDS)).isEqualTo(new StatementResult.Update("UPDATE", 1));
+        assertThat(second.transactionStatus()).isEqualTo(TransactionStatus.IN_TRANSACTION);
+        second.execute("COMMIT");
+        assertThat(rows(first, "SELECT id, v FROM t ORDER BY id")).containsExactly(List.of(1, 12), List.of(5, 50));
+    }
+
+    @Test
+    void repeatableReadConcurrentUpdateOfSameRowIsSerializationFailure() throws Exception {
+        first.execute("BEGIN");
+        second.execute("BEGIN ISOLATION LEVEL REPEATABLE READ");
         first.execute("UPDATE t SET v = v + 1 WHERE id = 1");
 
         // second ждёт блокировку строки, которую держит first.
@@ -260,6 +295,8 @@ class TransactionsTest {
                 {"START TRANSACTION", "END"},
                 {"begin work", "commit transaction"},
                 {"BEGIN ISOLATION LEVEL REPEATABLE READ;", "ABORT"},
+                {"BEGIN ISOLATION LEVEL READ COMMITTED", "COMMIT"},
+                {"start transaction isolation level read  uncommitted", "end"},
                 {"BEGIN TRANSACTION", "ROLLBACK WORK"}}) {
             first.execute(block[0]);
             assertThat(first.transactionStatus()).as(block[0]).isEqualTo(TransactionStatus.IN_TRANSACTION);

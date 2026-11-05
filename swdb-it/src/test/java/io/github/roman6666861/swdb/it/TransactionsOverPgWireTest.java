@@ -91,7 +91,8 @@ class TransactionsOverPgWireTest {
     }
 
     @Test
-    void concurrentUpdateOfSameRowFailsForSecondWriter() throws Exception {
+    void secondWriterWaitsAndSeesFirstUpdate() throws Exception {
+        // Уровень по умолчанию READ COMMITTED: второй UPDATE ждёт первый и применяется поверх него.
         first.setAutoCommit(false);
         second.setAutoCommit(false);
         update(first, "UPDATE t SET v = v + 1 WHERE id = 1");
@@ -108,11 +109,9 @@ class TransactionsOverPgWireTest {
 
         first.commit();
 
-        assertThat(waiting).failsWithin(5, TimeUnit.SECONDS).withThrowableThat()
-                .havingRootCause().isInstanceOfSatisfying(SQLException.class,
-                        e -> assertThat(e.getSQLState()).isEqualTo("40001"));
-        second.rollback();
-        assertThat(values(second)).containsExactly(11);
+        waiting.get(5, TimeUnit.SECONDS);
+        second.commit();
+        assertThat(values(second)).containsExactly(12);
     }
 
     private Connection connect() throws SQLException {
