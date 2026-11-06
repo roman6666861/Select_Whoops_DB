@@ -30,14 +30,31 @@ public final class KvTransaction implements AutoCloseable {
 
     private final Transaction transaction;
     private final TransactionOptions options;
+    private final RangeLockManager rangeLocks;
+    private final RangeLockManager.Owner rangeOwner = new RangeLockManager.Owner();
     private boolean finished;
 
-    KvTransaction(TransactionDB db, WriteOptions writeOptions, Duration lockTimeout) {
+    KvTransaction(TransactionDB db, WriteOptions writeOptions, Duration lockTimeout, RangeLockManager rangeLocks) {
+        this.rangeLocks = rangeLocks;
         this.options = new TransactionOptions()
                 .setSetSnapshot(true)
                 .setDeadlockDetect(true)
                 .setLockTimeout(lockTimeout.toMillis());
         this.transaction = db.beginTransaction(writeOptions, options);
+    }
+
+    /**
+     * Пытается захватить диапазон без ожидания. Отказ не завершает транзакцию.
+     * Диапазоны освобождаются после успешного commit/rollback или при close;
+     * откат к точке сохранения пока сохраняет их до конца транзакции.
+     * Проверки изменений после снимка здесь пока нет. Обычные get/put/scan
+     * автоматически диапазоны не захватывают.
+     */
+    public boolean tryLockRange(LockRange range, RangeLockManager.Mode mode) {
+        if (finished) {
+            throw new IllegalStateException("transaction is already finished");
+        }
+        return rangeLocks.tryAcquire(rangeOwner, range, mode);
     }
 
     /** Значение ключа по снимку транзакции с учётом собственных изменений. */
@@ -144,6 +161,7 @@ public final class KvTransaction implements AutoCloseable {
         finish();
         try {
             transaction.commit();
+            rangeLocks.releaseAll(rangeOwner);
         } catch (RocksDBException e) {
             throw error("commit", e);
         }
@@ -153,6 +171,7 @@ public final class KvTransaction implements AutoCloseable {
         finish();
         try {
             transaction.rollback();
+            rangeLocks.releaseAll(rangeOwner);
         } catch (RocksDBException e) {
             throw error("rollback", e);
         }
@@ -161,11 +180,21 @@ public final class KvTransaction implements AutoCloseable {
     /** Освобождает транзакцию; незафиксированные изменения откатываются. */
     @Override
     public void close() {
-        if (!finished) {
-            rollback();
+        try {
+            if (!finished) {
+                rollback();
+            }
+        } finally {
+            try {
+                try {
+                    transaction.close();
+                } finally {
+                    options.close();
+                }
+            } finally {
+                rangeLocks.releaseAll(rangeOwner);
+            }
         }
-        transaction.close();
-        options.close();
     }
 
     private void finish() {

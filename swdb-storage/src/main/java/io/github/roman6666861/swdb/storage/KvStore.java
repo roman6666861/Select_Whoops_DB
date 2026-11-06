@@ -40,6 +40,7 @@ public final class KvStore implements AutoCloseable {
     private final TransactionDBOptions transactionOptions;
     private final WriteOptions writeOptions;
     private final TransactionDB db;
+    private final RangeLockManager rangeLocks = new RangeLockManager();
 
     private KvStore(Options options, TransactionDBOptions transactionOptions, TransactionDB db) {
         this.options = options;
@@ -74,7 +75,7 @@ public final class KvStore implements AutoCloseable {
 
     /** Новая транзакция; её снимок данных берётся в момент вызова. Обязательно закрывать. */
     public KvTransaction begin(Duration lockTimeout) {
-        return new KvTransaction(db, writeOptions, lockTimeout);
+        return new KvTransaction(db, writeOptions, lockTimeout, rangeLocks);
     }
 
     public byte[] get(byte[] key) {
