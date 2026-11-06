@@ -23,12 +23,88 @@ class CatalogCrashRecoveryTest {
 
     @Test
     void rowsAndSecondaryIndexRecoverTogetherAfterHalt() throws Exception {
+        Path data = runUntilHalt(CrashWriter.class);
+        try (KvStore store = KvStore.open(data)) {
+            Catalog catalog = new Catalog(store);
+            try (KvTransaction tx = catalog.begin()) {
+                TableStore table = catalog.openTable(tx, "items").orElseThrow();
+                assertThat(table.table().indexes()).hasSize(1);
+                IndexDef index = table.table().indexes().getFirst();
+                assertThat(index.name()).isEqualTo("items_value");
+                List<List<Object>> expected = List.of(
+                        List.of(1, "new"), List.of(3, "shared"), List.of(4, "shared"));
+                assertThat(rows(table.scan(tx))).containsExactlyElementsOf(expected);
+                assertThat(rows(table.scanIndex(tx, index, null, null)))
+                        .containsExactlyElementsOf(expected);
+                for (String absent : List.of("old", "deleted", "pending")) {
+                    assertThat(rows(table.scanIndex(tx, index,
+                            KeyBound.inclusive(absent), KeyBound.inclusive(absent))))
+                            .as("в индексе не должно остаться значения %s", absent).isEmpty();
+                }
+                assertThat(rows(table.scanIndex(tx, index,
+                        KeyBound.inclusive("new"), KeyBound.inclusive("new"))))
+                        .containsExactly(List.of(1, "new"));
+                assertThat(rows(table.scanIndex(tx, index,
+                        KeyBound.inclusive("shared"), KeyBound.inclusive("shared"))))
+                        .containsExactly(List.of(3, "shared"), List.of(4, "shared"));
+            }
+        }
+    }
+
+    @Test
+    void uncommittedTableAndIndexesDisappearAfterHalt() throws Exception {
+        Path data = runUntilHalt(DdlCrashWriter.class, "create");
+        try (KvStore store = KvStore.open(data)) {
+            Catalog catalog = new Catalog(store);
+            try (KvTransaction tx = catalog.begin()) {
+                assertBaseline(catalog, tx);
+                assertThat(catalog.tables(tx)).extracting(t -> t.table().name()).containsExactly("items");
+                for (String name : List.of("pending_items", "pending_items_value", "pending_value")) {
+                    assertThat(catalog.relationExists(tx, name)).as("имя %s не должно сохраниться", name).isFalse();
+                }
+                assertThat(catalog.table(tx, "pending_items")).isEmpty();
+            }
+        }
+    }
+
+    @Test
+    void uncommittedTableAndIndexDropsDisappearAfterHalt() throws Exception {
+        Path data = runUntilHalt(DdlCrashWriter.class, "drop");
+        try (KvStore store = KvStore.open(data)) {
+            Catalog catalog = new Catalog(store);
+            try (KvTransaction tx = catalog.begin()) {
+                assertBaseline(catalog, tx);
+                assertThat(catalog.tables(tx)).extracting(t -> t.table().name())
+                        .containsExactlyInAnyOrder("items", "dropped_items");
+                TableStore restored = catalog.openTable(tx, "dropped_items").orElseThrow();
+                assertThat(catalog.relationExists(tx, "dropped_items_value")).isTrue();
+                assertThat(restored.table().indexes()).extracting(IndexDef::name)
+                        .containsExactly("dropped_items_value");
+                assertThat(rows(restored.scan(tx))).containsExactly(List.of(2, "saved"));
+                assertThat(rows(restored.scanIndex(tx, restored.table().indexes().getFirst(), null, null)))
+                        .containsExactly(List.of(2, "saved"));
+            }
+        }
+    }
+
+    private static void assertBaseline(Catalog catalog, KvTransaction tx) {
+        TableStore table = catalog.openTable(tx, "items").orElseThrow();
+        assertThat(catalog.relationExists(tx, "items_value")).isTrue();
+        assertThat(table.table().indexes()).extracting(IndexDef::name).containsExactly("items_value");
+        assertThat(rows(table.scan(tx))).containsExactly(List.of(1, "saved"));
+        assertThat(rows(table.scanIndex(tx, table.table().indexes().getFirst(), null, null)))
+                .containsExactly(List.of(1, "saved"));
+    }
+
+    private Path runUntilHalt(Class<?> writer, String... arguments) throws Exception {
         Path data = dir.resolve("data");
         Path output = dir.resolve("child.log");
         String java = Path.of(System.getProperty("java.home"), "bin", "java").toString();
-        Process child = new ProcessBuilder(java, "--enable-native-access=ALL-UNNAMED",
+        List<String> command = new ArrayList<>(List.of(java, "--enable-native-access=ALL-UNNAMED",
                 "-cp", System.getProperty("swdb.test.classpath"),
-                CrashWriter.class.getName(), data.toString())
+                writer.getName(), data.toString()));
+        command.addAll(List.of(arguments));
+        Process child = new ProcessBuilder(command)
                 .redirectErrorStream(true)
                 .redirectOutput(output.toFile())
                 .start();
@@ -39,37 +115,49 @@ class CatalogCrashRecoveryTest {
                     .as("процесс должен дойти до halt; вывод: %s", Files.readString(output))
                     .isEqualTo(CRASH_EXIT_CODE);
 
-            try (KvStore store = KvStore.open(data)) {
-                Catalog catalog = new Catalog(store);
-                try (KvTransaction tx = catalog.begin()) {
-                    TableStore table = catalog.openTable(tx, "items").orElseThrow();
-                    assertThat(table.table().indexes()).hasSize(1);
-                    IndexDef index = table.table().indexes().getFirst();
-                    assertThat(index.name()).isEqualTo("items_value");
-                    List<List<Object>> expected = List.of(
-                            List.of(1, "new"), List.of(3, "shared"), List.of(4, "shared"));
-                    assertThat(rows(table.scan(tx))).containsExactlyElementsOf(expected);
-                    assertThat(rows(table.scanIndex(tx, index, null, null)))
-                            .containsExactlyElementsOf(expected);
-                    for (String absent : List.of("old", "deleted", "pending")) {
-                        assertThat(rows(table.scanIndex(tx, index,
-                                KeyBound.inclusive(absent), KeyBound.inclusive(absent))))
-                                .as("в индексе не должно остаться значения %s", absent).isEmpty();
-                    }
-                    assertThat(rows(table.scanIndex(tx, index,
-                            KeyBound.inclusive("new"), KeyBound.inclusive("new"))))
-                            .containsExactly(List.of(1, "new"));
-                    assertThat(rows(table.scanIndex(tx, index,
-                            KeyBound.inclusive("shared"), KeyBound.inclusive("shared"))))
-                            .containsExactly(List.of(3, "shared"), List.of(4, "shared"));
-                }
-            }
+            return data;
         } finally {
             if (child.isAlive()) {
                 child.destroyForcibly();
                 assertThat(child.waitFor(10, TimeUnit.SECONDS))
                         .as("зависший дочерний процесс должен быть остановлен").isTrue();
             }
+        }
+    }
+
+    public static final class DdlCrashWriter {
+
+        public static void main(String[] args) {
+            KvStore store = KvStore.open(Path.of(args[0]));
+            Catalog catalog = new Catalog(store);
+            try (KvTransaction tx = catalog.begin()) {
+                createIndexedTable(catalog, tx, "items", 1);
+                if (args[1].equals("drop")) {
+                    createIndexedTable(catalog, tx, "dropped_items", 2);
+                }
+                tx.commit();
+            }
+            KvTransaction pending = catalog.begin();
+            switch (args[1]) {
+                case "create" -> {
+                    createIndexedTable(catalog, pending, "pending_items", 3);
+                    catalog.createIndex(pending, "items", "pending_value", List.of("value"), false, false);
+                }
+                case "drop" -> {
+                    catalog.dropIndex(pending, "items_value", false);
+                    catalog.dropTable(pending, "dropped_items", false);
+                }
+                default -> throw new IllegalArgumentException("unknown scenario: " + args[1]);
+            }
+            Runtime.getRuntime().halt(CRASH_EXIT_CODE);
+        }
+
+        private static void createIndexedTable(Catalog catalog, KvTransaction tx, String name, int id) {
+            catalog.createTable(tx, name, List.of(
+                    new ColumnDef("id", ColumnType.INTEGER, -1, -1, false),
+                    new ColumnDef("value", ColumnType.VARCHAR, 32, -1, false)), List.of("id"), false);
+            catalog.openTable(tx, name).orElseThrow().insert(tx, new Object[]{id, "saved"});
+            catalog.createIndex(tx, name, name + "_value", List.of("value"), false, false);
         }
     }
 
