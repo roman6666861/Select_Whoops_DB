@@ -12,7 +12,7 @@ enum IsolationLevel {
     REPEATABLE_READ,
     /**
      * Как REPEATABLE READ, плюс двухфазные блокировки таблиц между SERIALIZABLE-транзакциями
-     * ({@code Catalog.lockSerializable}): результат такой, будто они выполнялись по очереди.
+     * ({@code SerializableLocks.lockTable}): результат такой, будто они выполнялись по очереди.
      */
     SERIALIZABLE;
 

@@ -2,6 +2,7 @@ package io.github.roman6666861.swdb.sql.schema;
 
 import io.github.roman6666861.swdb.catalog.Catalog;
 import io.github.roman6666861.swdb.catalog.ColumnDef;
+import io.github.roman6666861.swdb.catalog.SerializableLocks;
 import io.github.roman6666861.swdb.catalog.TableDef;
 import io.github.roman6666861.swdb.catalog.TableStore;
 import io.github.roman6666861.swdb.common.SqlStates;
@@ -62,7 +63,7 @@ final class SwdbTable extends AbstractQueryableTable implements ModifiableTable,
      * Описание читается через транзакцию оператора с разделяемой блокировкой таблицы
      * ({@link Catalog#openTable}): пока транзакция не закончится, DDL этой таблицы ждёт.
      * В транзакции SERIALIZABLE таблица ещё и блокируется для чтения или записи
-     * ({@link Catalog#lockSerializable}).
+     * ({@link SerializableLocks#lockTable}).
      */
     private TableStore store(boolean write) {
         KvTransaction tx = transaction.current();
@@ -71,7 +72,7 @@ final class SwdbTable extends AbstractQueryableTable implements ModifiableTable,
                 .orElseThrow(() -> new SwdbException(SqlStates.UNDEFINED_TABLE,
                         "relation \"" + table.name() + "\" does not exist"));
         if (transaction.serializable()) {
-            catalog.lockSerializable(tx, table.id(), write);
+            SerializableLocks.lockTable(tx, table.id(), write);
         }
         return store;
     }

@@ -18,7 +18,7 @@ public final class SessionTransaction {
         set(transaction, false);
     }
 
-    /** @param serializable транзакция SERIALIZABLE: таблицы блокируются {@code Catalog.lockSerializable} */
+    /** @param serializable транзакция SERIALIZABLE: таблицы блокируются {@code SerializableLocks.lockTable} */
     public void set(KvTransaction transaction, boolean serializable) {
         if (current != null) {
             throw new IllegalStateException("transaction is already set");
