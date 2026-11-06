@@ -9,6 +9,7 @@ import io.github.roman6666861.swdb.storage.KeyBuilder;
  *   'M' 'N' [имя]                                        → 'T' или 'I' (таблица или индекс), [tableId]
  *   'D' [tableId] [pk...]                                → строка таблицы
  *   'I' [tableId] [indexId] [значения колонок...] [pk...] → ключ строки 'D' [tableId] [pk...]
+ *   'L' [tableId]                                        → пусто: блокировка таблицы для SERIALIZABLE
  * </pre>
  * {@code tableId} и {@code indexId} — 4 байта big-endian, поэтому данные одной таблицы и записи
  * одного индекса лежат непрерывными диапазонами.
@@ -28,6 +29,7 @@ final class Keys {
     private static final int META_NAME = 'N';
     private static final int DATA = 'D';
     private static final int INDEX = 'I';
+    private static final int SERIALIZABLE_LOCK = 'L';
 
     private Keys() {
     }
@@ -58,5 +60,9 @@ final class Keys {
 
     static byte[] indexPrefix(int tableId, int indexId) {
         return index(tableId, indexId).build();
+    }
+
+    static byte[] serializableLock(int tableId) {
+        return new KeyBuilder().appendByte(SERIALIZABLE_LOCK).appendInt(tableId).build();
     }
 }

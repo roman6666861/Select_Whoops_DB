@@ -297,6 +297,7 @@ class TransactionsTest {
                 {"BEGIN ISOLATION LEVEL REPEATABLE READ;", "ABORT"},
                 {"BEGIN ISOLATION LEVEL READ COMMITTED", "COMMIT"},
                 {"start transaction isolation level read  uncommitted", "end"},
+                {"BEGIN ISOLATION LEVEL SERIALIZABLE", "COMMIT"},
                 {"BEGIN TRANSACTION", "ROLLBACK WORK"}}) {
             first.execute(block[0]);
             assertThat(first.transactionStatus()).as(block[0]).isEqualTo(TransactionStatus.IN_TRANSACTION);
@@ -311,7 +312,7 @@ class TransactionsTest {
         assertThat(first.transactionStatus()).isEqualTo(TransactionStatus.IN_TRANSACTION);
         first.execute("ROLLBACK");
 
-        assertSqlState(() -> first.execute("BEGIN ISOLATION LEVEL SERIALIZABLE"), SqlStates.FEATURE_NOT_SUPPORTED);
+        assertSqlState(() -> first.execute("BEGIN READ ONLY"), SqlStates.FEATURE_NOT_SUPPORTED);
         assertThat(first.transactionStatus()).isEqualTo(TransactionStatus.IDLE);
     }
 

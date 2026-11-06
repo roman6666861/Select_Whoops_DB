@@ -51,7 +51,7 @@ final class TransactionBlock {
                 if (open == null && !failed) {
                     open = catalog.begin();
                     level = begin.level();
-                    current.set(open);
+                    current.set(open, level == IsolationLevel.SERIALIZABLE);
                 }
                 yield new StatementResult.Update("BEGIN", 0);
             }
@@ -115,7 +115,11 @@ final class TransactionBlock {
      */
     <T> T withTransaction(Supplier<T> work) {
         if (open != null) {
-            return level == IsolationLevel.READ_COMMITTED ? readCommitted(work) : work.get();
+            return switch (level) {
+                case READ_COMMITTED -> readCommitted(work);
+                case REPEATABLE_READ -> work.get();
+                case SERIALIZABLE -> serializable(work);
+            };
         }
         for (int attempt = 1; ; attempt++) {
             try (KvTransaction tx = catalog.begin()) {
@@ -150,6 +154,23 @@ final class TransactionBlock {
                 }
                 open.rollbackToSavepoint();
             }
+        }
+    }
+
+    /**
+     * Оператор в блоке SERIALIZABLE. Взаимная блокировка здесь — обычно две транзакции, которые
+     * обе прочитали таблицу и обе хотят в неё писать (write skew). Клиенту это сообщается как
+     * {@code 40001}, как в PostgreSQL: повторить транзакцию, а не разбираться с deadlock.
+     */
+    private <T> T serializable(Supplier<T> work) {
+        try {
+            return work.get();
+        } catch (SwdbException e) {
+            if (e.sqlState().equals(SqlStates.DEADLOCK_DETECTED)) {
+                throw new SwdbException(SqlStates.SERIALIZATION_FAILURE,
+                        "could not serialize access due to read/write dependencies among transactions", e);
+            }
+            throw e;
         }
     }
 

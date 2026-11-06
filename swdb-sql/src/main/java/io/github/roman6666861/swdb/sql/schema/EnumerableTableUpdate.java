@@ -103,7 +103,7 @@ public final class EnumerableTableUpdate extends TableModify implements Enumerab
     public static Enumerable<Long> execute(ModifiableTable table, Enumerable<Object[]> rows,
                                            int[] targetColumns, int[] sourceFields) {
         SwdbTable swdbTable = (SwdbTable) table;
-        TableStore store = swdbTable.store();
+        TableStore store = swdbTable.storeForWrite();
         int columnCount = store.table().columns().size();
         // Сначала читаем всё, потом пишем: иначе изменённая строка могла бы попасть в чтение повторно.
         List<TableStore.Change> changes = new ArrayList<>();

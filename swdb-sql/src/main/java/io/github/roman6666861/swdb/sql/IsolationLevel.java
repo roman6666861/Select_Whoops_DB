@@ -9,7 +9,12 @@ enum IsolationLevel {
     /** Свой снимок у каждого оператора: оператор видит всё, что зафиксировано до его начала. */
     READ_COMMITTED,
     /** Один снимок на всю транзакцию, взятый при BEGIN. */
-    REPEATABLE_READ;
+    REPEATABLE_READ,
+    /**
+     * Как REPEATABLE READ, плюс двухфазные блокировки таблиц между SERIALIZABLE-транзакциями
+     * ({@code Catalog.lockSerializable}): результат такой, будто они выполнялись по очереди.
+     */
+    SERIALIZABLE;
 
     /** Уровень по умолчанию для BEGIN, как в PostgreSQL. */
     static final IsolationLevel DEFAULT = READ_COMMITTED;

@@ -56,8 +56,7 @@ sealed interface TransactionCommand {
         return switch (level.group(1).toLowerCase(Locale.ROOT).replaceAll("\\s+", " ")) {
             case "read uncommitted", "read committed" -> IsolationLevel.READ_COMMITTED;
             case "repeatable read" -> IsolationLevel.REPEATABLE_READ;
-            default -> throw new SwdbException(SqlStates.FEATURE_NOT_SUPPORTED,
-                    "isolation level SERIALIZABLE is not supported yet");
+            default -> IsolationLevel.SERIALIZABLE;
         };
     }
 }

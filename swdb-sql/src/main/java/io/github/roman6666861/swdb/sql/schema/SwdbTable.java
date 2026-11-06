@@ -61,12 +61,29 @@ final class SwdbTable extends AbstractQueryableTable implements ModifiableTable,
      * по удалённому индексу. Таблица, пересозданная с тем же именем, — уже другая таблица.
      * Описание читается через транзакцию оператора с разделяемой блокировкой таблицы
      * ({@link Catalog#openTable}): пока транзакция не закончится, DDL этой таблицы ждёт.
+     * В транзакции SERIALIZABLE таблица ещё и блокируется для чтения или записи
+     * ({@link Catalog#lockSerializable}).
      */
-    TableStore store() {
-        return catalog.openTable(transaction.current(), table.name())
-                .filter(store -> store.table().id() == table.id())
+    private TableStore store(boolean write) {
+        KvTransaction tx = transaction.current();
+        TableStore store = catalog.openTable(tx, table.name())
+                .filter(found -> found.table().id() == table.id())
                 .orElseThrow(() -> new SwdbException(SqlStates.UNDEFINED_TABLE,
                         "relation \"" + table.name() + "\" does not exist"));
+        if (transaction.serializable()) {
+            catalog.lockSerializable(tx, table.id(), write);
+        }
+        return store;
+    }
+
+    /** Хранилище для чтения строк ({@link #store(boolean)}). */
+    TableStore storeForRead() {
+        return store(false);
+    }
+
+    /** Хранилище для изменения строк ({@link #store(boolean)}). */
+    TableStore storeForWrite() {
+        return store(true);
     }
 
     /** Транзакция оператора, который сейчас выполняется в сессии. */
@@ -93,7 +110,7 @@ final class SwdbTable extends AbstractQueryableTable implements ModifiableTable,
         return new AbstractTableQueryable<>(queryProvider, schema, this, tableName) {
             @Override
             public Enumerator<T> enumerator() {
-                return new RowEnumerator<>(store(), transaction, KeyRange.ALL, row -> (T) row);
+                return new RowEnumerator<>(storeForRead(), transaction, KeyRange.ALL, row -> (T) row);
             }
         };
     }
@@ -104,7 +121,7 @@ final class SwdbTable extends AbstractQueryableTable implements ModifiableTable,
      */
     @Override
     public Enumerable<Object[]> scan(DataContext root, List<RexNode> filters) {
-        TableStore store = store();
+        TableStore store = storeForRead();
         KeyRange range = KeyConditions.extract(store.table(), filters, new RexBuilder(root.getTypeFactory()), root);
         return new AbstractEnumerable<>() {
             @Override
@@ -116,7 +133,7 @@ final class SwdbTable extends AbstractQueryableTable implements ModifiableTable,
 
     @Override
     public Collection<Object> getModifiableCollection() {
-        return new RowCollection(store(), transaction.current());
+        return new RowCollection(storeForWrite(), transaction.current());
     }
 
     @Override

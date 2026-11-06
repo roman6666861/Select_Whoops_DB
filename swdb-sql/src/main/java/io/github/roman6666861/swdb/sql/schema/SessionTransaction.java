@@ -12,16 +12,28 @@ import io.github.roman6666861.swdb.storage.KvTransaction;
 public final class SessionTransaction {
 
     private KvTransaction current;
+    private boolean serializable;
 
     public void set(KvTransaction transaction) {
+        set(transaction, false);
+    }
+
+    /** @param serializable транзакция SERIALIZABLE: таблицы блокируются {@code Catalog.lockSerializable} */
+    public void set(KvTransaction transaction, boolean serializable) {
         if (current != null) {
             throw new IllegalStateException("transaction is already set");
         }
         current = transaction;
+        this.serializable = serializable;
     }
 
     public void clear() {
         current = null;
+        serializable = false;
+    }
+
+    boolean serializable() {
+        return serializable;
     }
 
     public KvTransaction current() {
