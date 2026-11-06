@@ -6,3 +6,8 @@ dependencies {
     api project(':swdb-common')
     implementation libs.rocksdbjni
 }
+
+tasks.named('test', Test) {
+    // java.class.path у Gradle test worker не содержит полный classpath тестов.
+    systemProperty 'swdb.test.classpath', sourceSets.test.runtimeClasspath.asPath
+}
