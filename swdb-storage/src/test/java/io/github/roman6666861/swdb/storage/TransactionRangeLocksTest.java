@@ -1,9 +1,12 @@
 package io.github.roman6666861.swdb.storage;
 
+import io.github.roman6666861.swdb.common.SqlStates;
+import io.github.roman6666861.swdb.common.SwdbException;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.function.Consumer;
 
 import static io.github.roman6666861.swdb.storage.RangeLockManager.Mode.EXCLUSIVE;
@@ -87,6 +90,38 @@ class TransactionRangeLocksTest {
             assertThat(second.tryLockRange(RANGE, SHARED)).isFalse();
             first.rollback();
             assertThat(second.tryLockRange(RANGE, EXCLUSIVE)).isTrue();
+        }
+    }
+
+    @Test
+    void rangeWaitUsesTransactionTimeoutAndRemainsUsableAfterTimeout() {
+        try (KvStore store = KvStore.open(dir);
+             KvTransaction first = store.begin(); KvTransaction second = store.begin(Duration.ofMillis(50))) {
+            first.lockRange(RANGE, EXCLUSIVE);
+            assertThatThrownBy(() -> second.lockRange(RANGE, SHARED))
+                    .isInstanceOfSatisfying(SwdbException.class,
+                            e -> assertThat(e.sqlState()).isEqualTo(SqlStates.LOCK_NOT_AVAILABLE));
+            first.commit();
+            second.lockRange(RANGE, EXCLUSIVE);
+            second.commit();
+            assertThatThrownBy(() -> second.lockRange(RANGE, SHARED))
+                    .isInstanceOf(IllegalStateException.class);
+        }
+    }
+
+    @Test
+    void rangeWaitRestoresInterruptFlag() {
+        try (KvStore store = KvStore.open(dir); KvTransaction tx = store.begin()) {
+            Thread.currentThread().interrupt();
+            try {
+                assertThatThrownBy(() -> tx.lockRange(RANGE, SHARED))
+                        .isInstanceOfSatisfying(SwdbException.class,
+                                e -> assertThat(e.sqlState()).isEqualTo(SqlStates.LOCK_NOT_AVAILABLE));
+                assertThat(Thread.currentThread().isInterrupted()).isTrue();
+            } finally {
+                Thread.interrupted(); // не оставляем прерывание в потоке JUnit
+            }
+            tx.lockRange(RANGE, EXCLUSIVE);
         }
     }
 }

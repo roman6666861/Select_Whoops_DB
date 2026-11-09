@@ -31,11 +31,13 @@ public final class KvTransaction implements AutoCloseable {
     private final Transaction transaction;
     private final TransactionOptions options;
     private final RangeLockManager rangeLocks;
+    private final Duration lockTimeout;
     private final RangeLockManager.Owner rangeOwner = new RangeLockManager.Owner();
     private boolean finished;
 
     KvTransaction(TransactionDB db, WriteOptions writeOptions, Duration lockTimeout, RangeLockManager rangeLocks) {
         this.rangeLocks = rangeLocks;
+        this.lockTimeout = lockTimeout;
         this.options = new TransactionOptions()
                 .setSetSnapshot(true)
                 .setDeadlockDetect(true)
@@ -55,6 +57,28 @@ public final class KvTransaction implements AutoCloseable {
             throw new IllegalStateException("transaction is already finished");
         }
         return rangeLocks.tryAcquire(rangeOwner, range, mode);
+    }
+
+    /**
+     * Захватывает диапазон с ожиданием не дольше тайм-аута, заданного при begin.
+     * Тайм-аут и прерывание сообщаются как LOCK_NOT_AVAILABLE; сама транзакция
+     * остаётся открытой, а уже захваченные диапазоны сохраняются.
+     * Как и tryLockRange, пока не проверяет изменения после снимка.
+     */
+    public void lockRange(LockRange range, RangeLockManager.Mode mode) {
+        if (finished) {
+            throw new IllegalStateException("transaction is already finished");
+        }
+        try {
+            if (!rangeLocks.acquire(rangeOwner, range, mode, lockTimeout)) {
+                throw new SwdbException(SqlStates.LOCK_NOT_AVAILABLE,
+                        "canceling statement due to range lock timeout");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new SwdbException(SqlStates.LOCK_NOT_AVAILABLE,
+                    "range lock wait interrupted", e);
+        }
     }
 
     /** Значение ключа по снимку транзакции с учётом собственных изменений. */

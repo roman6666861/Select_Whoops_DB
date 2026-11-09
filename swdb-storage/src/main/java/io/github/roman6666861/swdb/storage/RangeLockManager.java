@@ -1,13 +1,15 @@
 package io.github.roman6666861.swdb.storage;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Учёт блокировок диапазонов в памяти одного экземпляра БД.
  * Проверка конфликтов и регистрация блокировки выполняются атомарно.
- * При конфликте вызов возвращает false без ожидания и изменения состояния.
+ * tryAcquire возвращает false при конфликте, acquire ожидает до тайм-аута.
  * <p>
  * {@link KvStore} создаёт общий менеджер, а {@link KvTransaction} освобождает
  * своего владельца при завершении. При прямом использовании менеджера
@@ -52,9 +54,39 @@ public final class RangeLockManager {
         return true;
     }
 
+    /**
+     * Ожидает освобождения диапазона; false означает истечение тайм-аута.
+     * Нулевой тайм-аут разрешает только немедленный захват, отрицательный запрещён.
+     * При прерывании или тайм-ауте прежние блокировки владельца сохраняются.
+     * Очередь по порядку поступления и обнаружение взаимных блокировок пока отсутствуют.
+     */
+    public synchronized boolean acquire(Owner owner, LockRange range, Mode mode, Duration timeout)
+            throws InterruptedException {
+        Objects.requireNonNull(timeout, "timeout");
+        if (timeout.isNegative()) {
+            throw new IllegalArgumentException("timeout must not be negative");
+        }
+        long timeoutNanos = timeout.toNanos();
+        long started = System.nanoTime();
+        if (Thread.interrupted()) {
+            throw new InterruptedException();
+        }
+        while (!tryAcquire(owner, range, mode)) {
+            long remaining = timeoutNanos - (System.nanoTime() - started);
+            if (remaining <= 0) {
+                return false;
+            }
+            // wait освобождает монитор: другие транзакции могут снять блокировки.
+            TimeUnit.NANOSECONDS.timedWait(this, remaining);
+        }
+        return true;
+    }
+
     /** Освобождает все диапазоны владельца, не затрагивая остальных. Повторный вызов допустим. */
     public synchronized void releaseAll(Owner owner) {
         Objects.requireNonNull(owner, "owner");
-        locks.removeIf(held -> held.owner() == owner);
+        if (locks.removeIf(held -> held.owner() == owner)) {
+            notifyAll();
+        }
     }
 }
