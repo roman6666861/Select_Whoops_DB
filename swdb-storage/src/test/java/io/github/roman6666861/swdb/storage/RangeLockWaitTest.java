@@ -1,5 +1,7 @@
 package io.github.roman6666861.swdb.storage;
 
+import io.github.roman6666861.swdb.common.SqlStates;
+import io.github.roman6666861.swdb.common.SwdbException;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
@@ -75,9 +77,106 @@ class RangeLockWaitTest {
         }
     }
 
+    @Test
+    void detectsCycleBetweenTwoOwnersAndWaiterContinuesAfterRelease() throws Exception {
+        LockRange other = LockRange.point(new byte[]{20});
+        assertThat(manager.tryAcquire(first, RANGE, EXCLUSIVE)).isTrue();
+        assertThat(manager.tryAcquire(second, other, EXCLUSIVE)).isTrue();
+        try (Waiter waiter = startWaiter(first, other)) {
+            assertDeadlock(() -> manager.acquire(second, RANGE, EXCLUSIVE, Duration.ofSeconds(10)));
+            // Отказ не снимает уже полученные блокировки жертвы.
+            assertThat(manager.tryAcquire(third, other, SHARED)).isFalse();
+            manager.releaseAll(second);
+            assertThat(waiter.result().get(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(manager.acquire(second, RANGE, EXCLUSIVE, Duration.ofMillis(20))).isFalse();
+        }
+    }
+
+    @Test
+    void detectsCycleThroughThreeOwners() throws Exception {
+        LockRange middle = LockRange.point(new byte[]{20});
+        LockRange last = LockRange.point(new byte[]{30});
+        assertThat(manager.tryAcquire(first, RANGE, EXCLUSIVE)).isTrue();
+        assertThat(manager.tryAcquire(second, middle, EXCLUSIVE)).isTrue();
+        assertThat(manager.tryAcquire(third, last, EXCLUSIVE)).isTrue();
+        try (Waiter firstWaiter = startWaiter(first, middle);
+             Waiter secondWaiter = startWaiter(second, last)) {
+            assertDeadlock(() -> manager.acquire(third, RANGE, EXCLUSIVE, Duration.ofSeconds(10)));
+            manager.releaseAll(third);
+            assertThat(secondWaiter.result().get(5, TimeUnit.SECONDS)).isTrue();
+            manager.releaseAll(second);
+            assertThat(firstWaiter.result().get(5, TimeUnit.SECONDS)).isTrue();
+        }
+    }
+
+    @Test
+    void detectsCycleWhenReadersBothUpgradeToWrite() throws Exception {
+        assertThat(manager.tryAcquire(first, RANGE, SHARED)).isTrue();
+        assertThat(manager.tryAcquire(second, RANGE, SHARED)).isTrue();
+        try (Waiter waiter = startWaiter(first, RANGE)) {
+            assertDeadlock(() -> manager.acquire(second, RANGE, EXCLUSIVE, Duration.ofSeconds(10)));
+            manager.releaseAll(second);
+            assertThat(waiter.result().get(5, TimeUnit.SECONDS)).isTrue();
+        }
+    }
+
+    @Test
+    void timeoutRemovesWaitRequestSoLaterWaitDoesNotFormFalseCycle() throws Exception {
+        LockRange other = LockRange.point(new byte[]{20});
+        assertThat(manager.tryAcquire(first, RANGE, EXCLUSIVE)).isTrue();
+        assertThat(manager.tryAcquire(second, other, EXCLUSIVE)).isTrue();
+        assertThat(manager.acquire(second, RANGE, EXCLUSIVE, Duration.ofMillis(20))).isFalse();
+        assertThat(manager.acquire(first, other, EXCLUSIVE, Duration.ofMillis(20))).isFalse();
+    }
+
+    @Test
+    void releasedBlockerIsNotUsedAsStaleWaitDependency() throws Exception {
+        LockRange other = LockRange.point(new byte[]{20});
+        assertThat(manager.tryAcquire(first, RANGE, EXCLUSIVE)).isTrue();
+        assertThat(manager.tryAcquire(second, other, EXCLUSIVE)).isTrue();
+        try (Waiter waiter = startWaiter(first, other)) {
+            synchronized (manager) {
+                // Меняем владельца до того, как ожидающий поток успел проснуться.
+                manager.releaseAll(second);
+                assertThat(manager.tryAcquire(third, other, EXCLUSIVE)).isTrue();
+                // first теперь ждёт third, а не second: цикла с second нет.
+                assertThat(manager.acquire(second, RANGE, EXCLUSIVE, Duration.ofMillis(20))).isFalse();
+            }
+            manager.releaseAll(third);
+            assertThat(waiter.result().get(5, TimeUnit.SECONDS)).isTrue();
+        }
+    }
+
+    @Test
+    void interruptionRemovesWaitRequestSoLaterWaitDoesNotFormFalseCycle() throws Exception {
+        LockRange other = LockRange.point(new byte[]{20});
+        assertThat(manager.tryAcquire(first, RANGE, EXCLUSIVE)).isTrue();
+        assertThat(manager.tryAcquire(second, other, EXCLUSIVE)).isTrue();
+        try (Waiter waiter = startWaiter()) {
+            waiter.thread().interrupt();
+            assertThatThrownBy(() -> waiter.result().get(5, TimeUnit.SECONDS))
+                    .isInstanceOf(ExecutionException.class).hasCauseInstanceOf(InterruptedException.class);
+            assertThat(manager.acquire(first, other, EXCLUSIVE, Duration.ofMillis(20))).isFalse();
+        }
+    }
+
+    @FunctionalInterface
+    private interface LockAttempt {
+        boolean run() throws InterruptedException;
+    }
+
+    private static void assertDeadlock(LockAttempt attempt) {
+        assertThatThrownBy(attempt::run).isInstanceOfSatisfying(SwdbException.class,
+                e -> assertThat(e.sqlState()).isEqualTo(SqlStates.DEADLOCK_DETECTED));
+    }
+
     private Waiter startWaiter() throws Exception {
+        return startWaiter(second, RANGE);
+    }
+
+    private Waiter startWaiter(RangeLockManager.Owner owner, LockRange range) throws Exception {
         FutureTask<Boolean> result = new FutureTask<>(
-                () -> manager.acquire(second, RANGE, EXCLUSIVE, Duration.ofSeconds(10)));
+                () -> manager.acquire(owner, range, EXCLUSIVE, Duration.ofSeconds(10)));
         Waiter waiter = new Waiter(Thread.ofVirtual().start(result), result);
         try {
             long started = System.nanoTime();

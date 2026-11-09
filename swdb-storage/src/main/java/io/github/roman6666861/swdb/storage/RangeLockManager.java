@@ -1,8 +1,15 @@
 package io.github.roman6666861.swdb.storage;
 
+import io.github.roman6666861.swdb.common.SqlStates;
+import io.github.roman6666861.swdb.common.SwdbException;
+
 import java.time.Duration;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 
@@ -30,7 +37,11 @@ public final class RangeLockManager {
     private record HeldLock(Owner owner, LockRange range, Mode mode) {
     }
 
+    private record WaitRequest(LockRange range, Mode mode) {
+    }
+
     private final List<HeldLock> locks = new ArrayList<>();
+    private final Map<Owner, WaitRequest> waiting = new IdentityHashMap<>();
 
     /**
      * Пересекающиеся SHARED совместимы; EXCLUSIVE конфликтует с любым чужим режимом.
@@ -57,8 +68,10 @@ public final class RangeLockManager {
     /**
      * Ожидает освобождения диапазона; false означает истечение тайм-аута.
      * Нулевой тайм-аут разрешает только немедленный захват, отрицательный запрещён.
-     * При прерывании или тайм-ауте прежние блокировки владельца сохраняются.
-     * Очередь по порядку поступления и обнаружение взаимных блокировок пока отсутствуют.
+     * При прерывании, тайм-ауте или взаимной блокировке прежние блокировки сохраняются.
+     * Запрос, замыкающий цикл ожидания, получает DEADLOCK_DETECTED: вызывающий
+     * должен откатить транзакцию, чтобы освободить её блокировки.
+     * У одного владельца допустимо одно ожидание. Очереди по порядку поступления нет.
      */
     public synchronized boolean acquire(Owner owner, LockRange range, Mode mode, Duration timeout)
             throws InterruptedException {
@@ -71,15 +84,53 @@ public final class RangeLockManager {
         if (Thread.interrupted()) {
             throw new InterruptedException();
         }
-        while (!tryAcquire(owner, range, mode)) {
-            long remaining = timeoutNanos - (System.nanoTime() - started);
-            if (remaining <= 0) {
-                return false;
-            }
-            // wait освобождает монитор: другие транзакции могут снять блокировки.
-            TimeUnit.NANOSECONDS.timedWait(this, remaining);
+        if (waiting.containsKey(owner)) {
+            throw new IllegalStateException("owner is already waiting for a range lock");
         }
-        return true;
+        try {
+            while (!tryAcquire(owner, range, mode)) {
+                long remaining = timeoutNanos - (System.nanoTime() - started);
+                if (remaining <= 0) {
+                    return false;
+                }
+                waiting.put(owner, new WaitRequest(range, mode));
+                if (hasWaitCycle(owner)) {
+                    throw new SwdbException(SqlStates.DEADLOCK_DETECTED, "range lock deadlock detected");
+                }
+                // wait освобождает монитор: другие транзакции могут снять блокировки.
+                TimeUnit.NANOSECONDS.timedWait(this, remaining);
+            }
+            return true;
+        } finally {
+            waiting.remove(owner);
+        }
+    }
+
+    /** Проверяем пути ожидания по текущим блокировкам, не сохраняя устаревающие рёбра. */
+    private boolean hasWaitCycle(Owner start) {
+        ArrayDeque<Owner> pending = new ArrayDeque<>();
+        HashSet<Owner> visited = new HashSet<>();
+        pending.add(start);
+        while (!pending.isEmpty()) {
+            Owner owner = pending.removeLast();
+            if (!visited.add(owner)) {
+                continue;
+            }
+            WaitRequest request = waiting.get(owner);
+            if (request == null) {
+                continue;
+            }
+            for (HeldLock held : locks) {
+                if (held.owner() != owner && held.range().overlaps(request.range())
+                        && (held.mode() == Mode.EXCLUSIVE || request.mode() == Mode.EXCLUSIVE)) {
+                    if (held.owner() == start) {
+                        return true;
+                    }
+                    pending.add(held.owner());
+                }
+            }
+        }
+        return false;
     }
 
     /** Освобождает все диапазоны владельца, не затрагивая остальных. Повторный вызов допустим. */
